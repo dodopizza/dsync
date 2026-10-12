@@ -35,6 +35,7 @@ type MongoBaseFlags struct {
 	MaxPageSize        int32                  `protobuf:"varint,7,opt,name=max_page_size,json=maxPageSize,proto3" json:"max_page_size,omitempty"`
 	InitialSyncQuery   string                 `protobuf:"bytes,8,opt,name=initial_sync_query,json=initialSyncQuery,proto3" json:"initial_sync_query,omitempty"`
 	NamespaceFanout    int32                  `protobuf:"varint,9,opt,name=namespace_fanout,json=namespaceFanout,proto3" json:"namespace_fanout,omitempty"`
+	PageBufferTtl      *durationpb.Duration   `protobuf:"bytes,10,opt,name=page_buffer_ttl,json=pageBufferTtl,proto3" json:"page_buffer_ttl,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -132,6 +133,13 @@ func (x *MongoBaseFlags) GetNamespaceFanout() int32 {
 	return 0
 }
 
+func (x *MongoBaseFlags) GetPageBufferTtl() *durationpb.Duration {
+	if x != nil {
+		return x.PageBufferTtl
+	}
+	return nil
+}
+
 // Full MongoDB flags = base + MongoDB-specific extras
 type MongoFlags struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
@@ -205,7 +213,7 @@ var File_adiom_commands_connectors_v1_mongo_proto protoreflect.FileDescriptor
 
 const file_adiom_commands_connectors_v1_mongo_proto_rawDesc = "" +
 	"\n" +
-	"(adiom/commands/connectors/v1/mongo.proto\x12\x1cadiom.commands.connectors.v1\x1a\x1ccommandargs/v1/options.proto\x1a\x1egoogle/protobuf/duration.proto\"\xbe\x06\n" +
+	"(adiom/commands/connectors/v1/mongo.proto\x12\x1cadiom.commands.connectors.v1\x1a\x1ccommandargs/v1/options.proto\x1a\x1egoogle/protobuf/duration.proto\"\xf1\a\n" +
 	"\x0eMongoBaseFlags\x120\n" +
 	"\x14skip_batch_overwrite\x18\x01 \x01(\bR\x12skipBatchOverwrite\x12~\n" +
 	"\x11full_document_key\x18\x02 \x01(\bBR\x82\xb5\x18N\x12Luses the full document key instead of just _id (except for batch overwrites)R\x0ffullDocumentKey\x12V\n" +
@@ -222,7 +230,10 @@ const file_adiom_commands_connectors_v1_mongo_proto_rawDesc = "" +
 	"\x12initial_sync_query\x18\b \x01(\tBV\x82\xb5\x18R\n" +
 	"\x12initial-sync-query\x129query filter for the initial data copy (v2 Extended JSON):\x01qR\x10initialSyncQuery\x12y\n" +
 	"\x10namespace_fanout\x18\t \x01(\x05BN\x82\xb5\x18J\n" +
-	"\x10namespace-fanout\x121maximum number of namespaces to plan concurrently\x1a\x03100R\x0fnamespaceFanout:\x0f\x82\xb5\x18\v\n" +
+	"\x10namespace-fanout\x121maximum number of namespaces to plan concurrently\x1a\x03100R\x0fnamespaceFanout\x12\xb0\x01\n" +
+	"\x0fpage_buffer_ttl\x18\n" +
+	" \x01(\v2\x19.google.protobuf.DurationBm\x82\xb5\x18i\n" +
+	"\x0fpage-buffer-ttl\x12Rhow long an initial sync read buffer waits for the writer to request its next page\x1a\x021hR\rpageBufferTtl:\x0f\x82\xb5\x18\v\n" +
 	"\tMongoBase\"\x85\x04\n" +
 	"\n" +
 	"MongoFlags\x12@\n" +
@@ -256,12 +267,13 @@ var file_adiom_commands_connectors_v1_mongo_proto_goTypes = []any{
 var file_adiom_commands_connectors_v1_mongo_proto_depIdxs = []int32{
 	2, // 0: adiom.commands.connectors.v1.MongoBaseFlags.server_timeout:type_name -> google.protobuf.Duration
 	2, // 1: adiom.commands.connectors.v1.MongoBaseFlags.ping_timeout:type_name -> google.protobuf.Duration
-	0, // 2: adiom.commands.connectors.v1.MongoFlags.base:type_name -> adiom.commands.connectors.v1.MongoBaseFlags
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	2, // 2: adiom.commands.connectors.v1.MongoBaseFlags.page_buffer_ttl:type_name -> google.protobuf.Duration
+	0, // 3: adiom.commands.connectors.v1.MongoFlags.base:type_name -> adiom.commands.connectors.v1.MongoBaseFlags
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_adiom_commands_connectors_v1_mongo_proto_init() }

@@ -4,6 +4,7 @@ package connectorsv1
 
 import (
 	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	time "time"
 )
 
 import "github.com/urfave/cli/v2"
@@ -43,6 +44,11 @@ func CosmosFlagsCommandFlags() []cli.Flag {
 			Usage: "maximum number of namespaces to plan concurrently",
 			Value: 100,
 		},
+		&cli.DurationFlag{
+			Name:  "page-buffer-ttl",
+			Usage: "how long an initial sync read buffer waits for the writer to request its next page",
+			Value: func() time.Duration { d, _ := time.ParseDuration("1h"); return d }(),
+		},
 		&cli.IntFlag{
 			Name:     "cosmos-reader-max-namespaces",
 			Usage:    "max namespaces to copy (keep under 15)",
@@ -81,6 +87,7 @@ func ParseCosmosFlags(c *cli.Context) (*CosmosFlags, error) {
 	cfg.Mongo.MaxPageSize = int32(c.Int("max-page-size"))
 	cfg.Mongo.InitialSyncQuery = c.String("initial-sync-query")
 	cfg.Mongo.NamespaceFanout = int32(c.Int("namespace-fanout"))
+	cfg.Mongo.PageBufferTtl = durationpb.New(c.Duration("page-buffer-ttl"))
 	cfg.CosmosReaderMaxNamespaces = int32(c.Int("cosmos-reader-max-namespaces"))
 	cfg.CosmosDeletesCdc = c.String("cosmos-deletes-cdc")
 	cfg.CosmosDeleteInterval = durationpb.New(c.Duration("cosmos-delete-interval"))

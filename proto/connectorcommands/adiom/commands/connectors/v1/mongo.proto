@@ -41,6 +41,11 @@ message MongoBaseFlags {
     usage: "maximum number of namespaces to plan concurrently"
     default: "100"
   }];
+  google.protobuf.Duration page_buffer_ttl = 10 [(commandargs.v1.flag) = {
+    name: "page-buffer-ttl"
+    usage: "how long an initial sync read buffer waits for the writer to request its next page"
+    default: "1h"
+  }];
 }
 
 // Full MongoDB flags = base + MongoDB-specific extras
