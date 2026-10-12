@@ -36,7 +36,10 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const progressReportingIntervalSec = 10
+const (
+	progressReportingIntervalSec = 10
+	resumeTokenCheckTimeout      = 30 * time.Second
+)
 
 type Teardownable interface {
 	Teardown()
@@ -48,6 +51,7 @@ type ConnectorSettings struct {
 	MaxWriterBatchSize        int
 	MultinamespaceBatcher     bool
 	ResumeTokenUpdateInterval time.Duration
+	ResumeTokenCheckInterval  time.Duration
 	TransformClient           adiomv1connect.TransformServiceClient
 	SourceDataType            adiomv1.DataType
 	DestinationDataType       adiomv1.DataType
@@ -278,6 +282,50 @@ func (c *connector) failFlow(stage string, err error) {
 	slog.Error(err.Error())
 	c.coord.NotifyError(err)
 	c.flowCancelFunc()
+}
+
+func (c *connector) watchResumeToken(initialSyncDone <-chan struct{}, namespaces []string, token []byte) {
+	ticker := time.NewTicker(c.settings.ResumeTokenCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.flowCtx.Done():
+			return
+		case <-initialSyncDone:
+			return
+		case <-ticker.C:
+			if err := c.checkResumeToken(namespaces, token); err != nil {
+				c.failFlow("resume token check during initial sync", err)
+				return
+			}
+		}
+	}
+}
+
+func (c *connector) checkResumeToken(namespaces []string, token []byte) error {
+	ctx, cancel := context.WithTimeout(c.flowCtx, resumeTokenCheckTimeout)
+	defer cancel()
+	res, err := c.impl.StreamUpdates(ctx, connect.NewRequest(&adiomv1.StreamUpdatesRequest{
+		Namespaces: namespaces,
+		Type:       c.settings.SourceDataType,
+		Cursor:     token,
+	}))
+	if err == nil {
+		defer res.Close()
+		res.Receive()
+		err = res.Err()
+	}
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "ChangeStreamHistoryLost") {
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	slog.Warn(fmt.Sprintf("Resume token check failed, will retry: %v", err))
+	return nil
 }
 
 // Interrupt implements iface.Connector.
@@ -536,6 +584,10 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			c.failFlow("LSN tracker: change stream stopped", res.Err())
 		}
 	}()
+
+	if options.Mode != iface.SyncModeInitialSync && c.settings.ResumeTokenCheckInterval > 0 && len(tasks) > 0 {
+		go c.watchResumeToken(initialSyncDone, streamUpdatesNamespaces, initialResumeToken)
+	}
 
 	var initialSyncFailed atomic.Bool
 
