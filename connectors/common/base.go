@@ -317,17 +317,18 @@ func (c *connector) checkResumeToken(ctx context.Context, namespaces []string, t
 		Namespaces: namespaces,
 		Cursor:     token,
 	}))
+	received := false
 	if err == nil {
 		defer res.Close()
-		res.Receive()
+		received = res.Receive()
 		err = res.Err()
 	}
 	switch {
-	case err == nil, ctx.Err() != nil:
+	case received, ctx.Err() != nil:
 		return nil
-	case strings.Contains(err.Error(), "ChangeStreamHistoryLost"):
+	case err != nil && strings.Contains(err.Error(), "ChangeStreamHistoryLost"):
 		return err
-	case probeCtx.Err() != nil:
+	case err == nil, probeCtx.Err() != nil:
 		slog.Info(fmt.Sprintf("Resume token check inconclusive: no change events within %v", resumeTokenCheckTimeout))
 	default:
 		slog.Warn(fmt.Sprintf("Resume token check failed, will retry: %v", err))

@@ -102,6 +102,9 @@ func TestResumeTokenCheckIgnoresHealthyAndTransientStreams(t *testing.T) {
 		"opens": func(_ context.Context, s *connect.ServerStream[adiomv1.StreamLSNResponse]) error {
 			return s.Send(&adiomv1.StreamLSNResponse{NextCursor: []byte("next")})
 		},
+		"empty": func(context.Context, *connect.ServerStream[adiomv1.StreamLSNResponse]) error {
+			return nil
+		},
 		"transient": func(context.Context, *connect.ServerStream[adiomv1.StreamLSNResponse]) error {
 			return connect.NewError(connect.CodeUnavailable, errors.New("connection reset"))
 		},
