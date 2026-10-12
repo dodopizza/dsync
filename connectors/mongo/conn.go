@@ -171,8 +171,8 @@ func NamespacePartitions(ctx context.Context, namespaces []string, client *mongo
 	return partitions, nil
 }
 
-func findLargestID(ctx context.Context, col *mongo.Collection) (bson.RawValue, error) {
-	res, err := col.Find(ctx, bson.M{}, options.Find().SetSort(bson.M{"_id": -1}).SetLimit(1).SetProjection(bson.D{{"_id", 1}}))
+func findLargestID(ctx context.Context, col *mongo.Collection, query bson.D) (bson.RawValue, error) {
+	res, err := col.Find(ctx, append(bson.D{}, query...), options.Find().SetSort(bson.M{"_id": -1}).SetLimit(1).SetProjection(bson.D{{"_id", 1}}))
 	if err != nil {
 		return bson.RawValue{}, fmt.Errorf("err in find: %w", err)
 	}
@@ -186,8 +186,8 @@ func findLargestID(ctx context.Context, col *mongo.Collection) (bson.RawValue, e
 	return bson.RawValue{}, nil
 }
 
-func findSmallestID(ctx context.Context, col *mongo.Collection) (bson.RawValue, error) {
-	res, err := col.Find(ctx, bson.M{}, options.Find().SetSort(bson.M{"_id": 1}).SetLimit(1).SetProjection(bson.D{{"_id", 1}}))
+func findSmallestID(ctx context.Context, col *mongo.Collection, query bson.D) (bson.RawValue, error) {
+	res, err := col.Find(ctx, append(bson.D{}, query...), options.Find().SetSort(bson.M{"_id": 1}).SetLimit(1).SetProjection(bson.D{{"_id", 1}}))
 	if err != nil {
 		return bson.RawValue{}, fmt.Errorf("err in find: %w", err)
 	}
@@ -265,11 +265,11 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 			ns, _ := ToNS(partition.Namespace)
 			col := c.client.Database(ns.Db).Collection(ns.Col)
 
-			lowest, err := findSmallestID(ctx, col)
+			lowest, err := findSmallestID(ctx, col, c.query)
 			if err != nil {
 				return fmt.Errorf("err finding smallest id: %w", err)
 			}
-			high, err := findLargestID(ctx, col)
+			high, err := findLargestID(ctx, col, c.query)
 			if err != nil {
 				return fmt.Errorf("err finding largest id: %w", err)
 			}
@@ -474,8 +474,8 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 		c.buffersMutex.Unlock()
 
 		filter := createFindFilterFromCursor(r.Msg.GetPartition().GetCursor())
-		if len(c.query) > 0 { //if a query is provided, append it to the filter
-			filter = append(filter, c.query...)
+		if len(c.query) > 0 {
+			filter = bson.D{{"$and", bson.A{filter, c.query}}}
 		}
 
 		cursor, err := collection.Find(ctx, filter)

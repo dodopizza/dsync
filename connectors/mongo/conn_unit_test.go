@@ -361,3 +361,19 @@ func TestBuildBulkModels_ErrorPropagates(t *testing.T) {
 	_, _, err := c.buildBulkModels([]*adiomv1.Update{{Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT}})
 	assert.ErrorContains(t, err, "unexpected empty id")
 }
+
+func TestSamplePipeline_MatchesQueryAfterSample(t *testing.T) {
+	q := bson.D{{"_id", bson.D{{"$type", "string"}}}}
+	assert.Equal(t, mongo.Pipeline{
+		{{"$sample", bson.D{{"size", int64(10)}}}},
+		{{"$match", q}},
+		{{"$project", bson.D{{"_id", 1}}}},
+	}, samplePipeline(10, q))
+}
+
+func TestSamplePipeline_NoQuery(t *testing.T) {
+	assert.Equal(t, mongo.Pipeline{
+		{{"$sample", bson.D{{"size", int64(1)}}}},
+		{{"$project", bson.D{{"_id", 1}}}},
+	}, samplePipeline(1, nil))
+}
