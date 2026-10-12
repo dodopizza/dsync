@@ -361,3 +361,46 @@ func TestBuildBulkModels_ErrorPropagates(t *testing.T) {
 	_, _, err := c.buildBulkModels([]*adiomv1.Update{{Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT}})
 	assert.ErrorContains(t, err, "unexpected empty id")
 }
+
+func TestSamplePipeline_MatchesQueryAfterSample(t *testing.T) {
+	q := bson.D{{"_id", bson.D{{"$type", "string"}}}}
+	assert.Equal(t, mongo.Pipeline{
+		{{"$sample", bson.D{{"size", int64(10)}}}},
+		{{"$match", q}},
+		{{"$project", bson.D{{"_id", 1}}}},
+	}, samplePipeline(10, q))
+}
+
+func TestSamplePipeline_NoQuery(t *testing.T) {
+	assert.Equal(t, mongo.Pipeline{
+		{{"$sample", bson.D{{"size", int64(1)}}}},
+		{{"$project", bson.D{{"_id", 1}}}},
+	}, samplePipeline(1, nil))
+}
+
+func TestIDTypeAliasesCoverOrdinaryIDTypes(t *testing.T) {
+	for _, typ := range []bson.Type{
+		bson.TypeNull, bson.TypeUndefined, bson.TypeDouble, bson.TypeInt32, bson.TypeInt64, bson.TypeDecimal128,
+		bson.TypeString, bson.TypeSymbol, bson.TypeEmbeddedDocument, bson.TypeBinary, bson.TypeObjectID,
+		bson.TypeBoolean, bson.TypeDateTime, bson.TypeTimestamp,
+	} {
+		assert.Contains(t, idTypeAliases, bsonTypeSortOrder(typ), typ.String())
+	}
+	for _, typ := range []bson.Type{bson.TypeMinKey, bson.TypeMaxKey, bson.TypeRegex, bson.TypeDBPointer, bson.TypeJavaScript, bson.TypeCodeWithScope} {
+		assert.NotContains(t, idTypeAliases, bsonTypeSortOrder(typ), typ.String())
+	}
+}
+
+func TestNewConnWithClientRejectsInvalidQuery(t *testing.T) {
+	_, err := NewConnWithClient(nil, ConnectorSettings{Query: "{bad"})
+	assert.Error(t, err)
+}
+
+func TestAndFilter(t *testing.T) {
+	a := bson.D{{"_id", bson.D{{"$gt", 1}}}}
+	b := bson.D{{"_id", bson.D{{"$type", "string"}}}}
+	assert.Equal(t, a, andFilter(a, nil))
+	assert.Equal(t, b, andFilter(bson.D{}, b))
+	assert.Equal(t, bson.D{{"$and", bson.A{a, b}}}, andFilter(a, b))
+	assert.NotNil(t, andFilter(bson.D{}, nil))
+}

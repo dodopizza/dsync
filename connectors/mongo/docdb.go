@@ -297,11 +297,7 @@ func bsonTypeSortOrder(t bson.Type) int {
 
 func (c *conn) sampleIDs(ctx context.Context, col *mongo.Collection, numSamples int64) ([]bson.RawValue, error) {
 	if c.flavor != FlavorDocumentDB {
-		res, err := col.Aggregate(ctx, mongo.Pipeline{
-			{{"$sample", bson.D{{"size", numSamples}}}},
-			{{"$project", bson.D{{"_id", 1}}}},
-			{{"$sort", bson.D{{"_id", 1}}}},
-		})
+		res, err := col.Aggregate(ctx, append(samplePipeline(numSamples, c.query), bson.D{{"$sort", bson.D{{"_id", 1}}}}))
 		if err != nil {
 			return nil, fmt.Errorf("error getting %v samples: %w", numSamples, err)
 		}
@@ -324,21 +320,18 @@ func (c *conn) sampleIDs(ctx context.Context, col *mongo.Collection, numSamples 
 	results := make([]sampleResult, numSamples)
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.SetLimit(c.documentDBSamplingFanout())
-	for i := int64(0); i < numSamples; i++ {
-		i := i
+	for i := range numSamples {
 		eg.Go(func() error {
-			res, err := col.Aggregate(ctx, mongo.Pipeline{
-				{{"$sample", bson.D{{"size", 1}}}},
-				{{"$project", bson.D{{"_id", 1}}}},
-			})
+			res, err := col.Aggregate(ctx, samplePipeline(1, c.query))
 			if err != nil {
 				return fmt.Errorf("error getting sample %v: %w", i, err)
 			}
 			defer res.Close(ctx)
-			if res.Next(ctx) {
-				id := res.Current.Lookup("_id")
-				results[i] = sampleResult{id: id, key: hex.EncodeToString(id.Value)}
+			if !res.Next(ctx) {
+				return res.Err()
 			}
+			id := res.Current.Lookup("_id")
+			results[i] = sampleResult{id: id, key: hex.EncodeToString(id.Value)}
 			return nil
 		})
 	}
@@ -381,4 +374,12 @@ func (c *conn) documentDBSamplingFanout() int {
 		return c.settings.DocumentDBSamplingFanout
 	}
 	return defaultDocumentDBSamplingFanoutLimit
+}
+
+func samplePipeline(size int64, query bson.D) mongo.Pipeline {
+	p := mongo.Pipeline{{{"$sample", bson.D{{"size", size}}}}}
+	if len(query) > 0 {
+		p = append(p, bson.D{{"$match", query}})
+	}
+	return append(p, bson.D{{"$project", bson.D{{"_id", 1}}}})
 }
