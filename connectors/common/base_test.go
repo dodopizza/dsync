@@ -143,6 +143,8 @@ func runInitialSync(t *testing.T, coord *mocks.Coordinator, list func(*adiomv1.L
 	dataChannel := make(chan iface.DataMessage, 16)
 	transport := mocks.NewTransport(t)
 	transport.On("GetDataChannelEndpoint", mock.Anything).Return(dataChannel, nil)
+	done := make(chan struct{})
+	coord.On("NotifyDone", mock.Anything, mock.Anything).Return(nil).Once().Run(func(mock.Arguments) { close(done) })
 	var status iface.ConnectorStatus
 	c := &connector{
 		ctx:                t.Context(),
@@ -159,13 +161,17 @@ func runInitialSync(t *testing.T, coord *mocks.Coordinator, list func(*adiomv1.L
 	require.NoError(t, c.StartReadToChannel("flow", options, iface.ConnectorReadPlan{Tasks: []iface.ReadPlanTask{task}}, "data"))
 	for range dataChannel {
 	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("NotifyDone not called")
+	}
 	return c
 }
 
 func TestInitialSyncModeFailsFlowWhenTaskFails(t *testing.T) {
 	coord := mocks.NewCoordinator(t)
 	coord.On("NotifyError", mock.Anything).Once()
-	coord.On("NotifyDone", mock.Anything, mock.Anything).Return(nil).Once()
 
 	c := runInitialSync(t, coord, func(*adiomv1.ListDataRequest) (*adiomv1.ListDataResponse, error) {
 		return nil, connect.NewError(connect.CodeInternal, errors.New("unauthorized"))
@@ -177,7 +183,6 @@ func TestInitialSyncModeFailsFlowWhenTaskFails(t *testing.T) {
 func TestInitialSyncRetriesTaskFromItsStartAfterUnavailable(t *testing.T) {
 	coord := mocks.NewCoordinator(t)
 	coord.On("NotifyTaskDone", mock.Anything, mock.Anything, iface.ReadPlanTaskID(1), mock.Anything).Return(nil).Once()
-	coord.On("NotifyDone", mock.Anything, mock.Anything).Return(nil).Once()
 	var cursors [][]byte
 
 	c := runInitialSync(t, coord, func(r *adiomv1.ListDataRequest) (*adiomv1.ListDataResponse, error) {
