@@ -820,17 +820,32 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 	var lastResumeToken bson.Raw
 	var lastTime bson.Timestamp
 
-	for changeStream.Next(ctx) {
+	for {
+		if !changeStream.TryNext(ctx) {
+			if changeStream.Err() != nil || changeStream.ID() == 0 {
+				break
+			}
+			if token := changeStream.ResumeToken(); len(updates) > 0 || !bytes.Equal(token, lastResumeToken) {
+				lastResumeToken = token
+				resp := &adiomv1.StreamUpdatesResponse{Updates: updates, Namespace: currentNamespace, NextCursor: token}
+				if len(updates) > 0 {
+					resp.Time = toTimestampPB(lastTime)
+				}
+				if err := s.Send(resp); err != nil {
+					return streamSendErr(err)
+				}
+				updates = nil
+			}
+			continue
+		}
 		var change MongoUpdate
 		if err := changeStream.Decode(&change); err != nil {
-			slog.Error(fmt.Sprintf("Failed to decode change stream event: %v", err))
-			continue
+			return connect.NewError(connect.CodeInternal, fmt.Errorf("failed to decode change stream event: %w", err))
 		}
 
 		update, err := convertChangeStreamEventToUpdate(change, c.settings.FullDocumentKey)
 		if err != nil {
-			slog.Error(fmt.Sprintf("Failed to convert change stream event to data message: %v", err))
-			continue
+			return connect.NewError(connect.CodeInternal, fmt.Errorf("failed to convert change stream event: %w", err))
 		}
 		if update == nil {
 			continue
@@ -849,10 +864,7 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 					Time:       toTimestampPB(lastTime),
 				})
 				if err != nil {
-					if errors.Is(err, context.Canceled) {
-						return nil
-					}
-					slog.Error(fmt.Sprintf("failed to send updates: %v", err))
+					return streamSendErr(err)
 				}
 			}
 			currentNamespace = newNamespace
@@ -873,10 +885,7 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 				Time:       toTimestampPB(lastTime),
 			})
 			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
-				slog.Error(fmt.Sprintf("failed to send updates: %v", err))
+				return streamSendErr(err)
 			}
 			updates = nil
 		}
@@ -896,13 +905,18 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 			Time:       toTimestampPB(lastTime),
 		})
 		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				slog.Error(fmt.Sprintf("failed to send updates: %v", err))
-			}
+			return streamSendErr(err)
 		}
 	}
 
-	return nil
+	return connect.NewError(connect.CodeInternal, errors.New("change stream was closed by the server"))
+}
+
+func streamSendErr(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return connect.NewError(connect.CodeInternal, err)
 }
 
 // inserts data and overwrites on conflict

@@ -267,6 +267,19 @@ func (c *connector) IntegrityCheck(ctx context.Context, task iface.IntegrityChec
 	}, nil
 }
 
+func (c *connector) failFlow(stage string, err error) {
+	if c.flowCtx.Err() != nil {
+		return
+	}
+	if strings.Contains(err.Error(), "ChangeStreamHistoryLost") {
+		err = fmt.Errorf("%w; the flow's resume point is no longer in the source oplog, rerun it from scratch (--cleanup) into a fresh destination", err)
+	}
+	err = fmt.Errorf("%s: %w", stage, err)
+	slog.Error(err.Error())
+	c.coord.NotifyError(err)
+	c.flowCancelFunc()
+}
+
 // Interrupt implements iface.Connector.
 func (c *connector) Interrupt(flowId iface.FlowID) error {
 	if c.flowCancelFunc != nil {
@@ -512,9 +525,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			Cursor:     initialResumeToken,
 		}))
 		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				slog.Error(fmt.Sprintf("LSN tracker: Failed to open change stream: %v", err))
-			}
+			c.failFlow("LSN tracker: failed to open change stream", err)
 			return
 		}
 		defer res.Close()
@@ -522,9 +533,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			c.progressTracker.UpdateWriteLSN(int64(res.Msg().Lsn))
 		}
 		if res.Err() != nil {
-			if !errors.Is(res.Err(), context.Canceled) {
-				slog.Error(fmt.Sprintf("Failed during lsn stream: %v", res.Err()))
-			}
+			c.failFlow("LSN tracker: change stream stopped", res.Err())
 		}
 	}()
 
@@ -714,8 +723,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			return
 		}
 		if initialSyncFailed.Load() {
-			slog.Error("Some initial sync tasks failed. Canceling flow.")
-			c.flowCancelFunc()
+			c.failFlow("initial sync", errors.New("some initial sync tasks failed"))
 			return
 		}
 		c.progressTracker.UpdateSyncState(iface.ChangeStreamSyncState)
@@ -750,9 +758,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			Cursor:     initialResumeToken,
 		}))
 		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				slog.Error(fmt.Sprintf("Failed to stream updates: %v", err))
-			}
+			c.failFlow("failed to open change stream", err)
 			return
 		}
 		c.progressTracker.CDCActive()
@@ -763,7 +769,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 
 			updates := msg.GetUpdates()
 
-			if c.settings.TransformClient != nil {
+			if c.settings.TransformClient != nil && len(updates) > 0 {
 				transformed, err := c.settings.TransformClient.GetTransform(c.flowCtx, connect.NewRequest(&adiomv1.GetTransformRequest{
 					Namespace:    msg.GetNamespace(),
 					Updates:      updates,
@@ -771,8 +777,8 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 					ResponseType: c.settings.DestinationDataType,
 				}))
 				if err != nil {
-					slog.Error("err trying to transform updates")
-					continue
+					c.failFlow("transform", err)
+					return
 				}
 
 				// Since transforms can change sizes, we'll just batch up the updates based
@@ -871,12 +877,12 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 				c.resumeTokenMutex.Unlock()
 			}
 
-			c.progressTracker.UpdateChangeStreamLastTime(msg.GetTime().AsTime())
+			if msg.GetTime() != nil {
+				c.progressTracker.UpdateChangeStreamLastTime(msg.GetTime().AsTime())
+			}
 		}
 		if res.Err() != nil {
-			if !errors.Is(res.Err(), context.Canceled) {
-				slog.Error(fmt.Sprintf("Failed during stream updates: %v", res.Err()))
-			}
+			c.failFlow("change stream stopped", res.Err())
 		}
 	}()
 
@@ -973,7 +979,7 @@ func (c *connector) StartWriteFromChannel(flowId iface.FlowID, dataChannelID ifa
 		}
 
 		if err := flowParallelWriter.StopAndWait(); err != nil {
-			c.coord.NotifyError(err)
+			c.failFlow("writer", err)
 		}
 		slog.Info(fmt.Sprintf("Connector %s is done writing for flow %s", c.id, flowId))
 		err := c.coord.NotifyDone(flowId, c.id)
@@ -986,7 +992,7 @@ func (c *connector) StartWriteFromChannel(flowId iface.FlowID, dataChannelID ifa
 }
 
 func (c *connector) HandlerError(err error) error {
-	c.flowCancelFunc()
+	c.failFlow("writer", err)
 	return err
 }
 
