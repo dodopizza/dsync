@@ -1265,7 +1265,7 @@ func (c *conn) changeStreamOpts(cursor []byte) *moptions.ChangeStreamOptionsBuil
 
 const cosmosTooManyRequestsCode = 16500
 
-var transientServerCodes = []int{6, 7, 89, 91, 134, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436, cosmosTooManyRequestsCode}
+var transientServerCodes = []int{6, 7, 50, 64, 89, 91, 134, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436, cosmosTooManyRequestsCode}
 
 var transientErrorLabels = []string{"RetryableWriteError", "NetworkError"}
 

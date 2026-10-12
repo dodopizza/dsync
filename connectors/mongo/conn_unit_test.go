@@ -442,7 +442,7 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 		"throttled bulk with invalid doc":              {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 16500}}, {WriteError: mongo.WriteError{Code: 2}}}}, connect.CodeInternal},
 		"bulk with only duplicates":                    {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 11000}}}}, connect.CodeInternal},
 		"bulk write concern shutdown":                  {mongo.BulkWriteException{WriteConcernError: &mongo.WriteConcernError{Code: 91}}, connect.CodeUnavailable},
-		"bulk write concern failed":                    {mongo.BulkWriteException{WriteConcernError: &mongo.WriteConcernError{Code: 64}}, connect.CodeInternal},
+		"bulk write concern failed":                    {mongo.BulkWriteException{WriteConcernError: &mongo.WriteConcernError{Code: 64}}, connect.CodeUnavailable},
 		"primary stepped down":                         {mongo.CommandError{Code: 189, Name: "PrimarySteppedDown"}, connect.CodeUnavailable},
 		"retryable write label":                        {mongo.CommandError{Code: 1, Labels: []string{"RetryableWriteError"}}, connect.CodeUnavailable},
 		"shard host unreachable":                       {mongo.CommandError{Code: 6, Name: "HostUnreachable"}, connect.CodeUnavailable},
@@ -451,6 +451,7 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 		"labeled bulk with invalid doc":                {mongo.BulkWriteException{Labels: []string{"NetworkError"}, WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 2}}}}, connect.CodeInternal},
 		"write with invalid doc and throttled concern": {mongo.WriteException{WriteErrors: mongo.WriteErrors{{Code: 2}}, WriteConcernError: &mongo.WriteConcernError{Code: 16500}}, connect.CodeInternal},
 		"throttled write":                              {mongo.WriteException{WriteErrors: mongo.WriteErrors{{Code: 16500}}}, connect.CodeUnavailable},
+		"write concern maxTimeMS":                      {mongo.WriteException{WriteConcernError: &mongo.WriteConcernError{Code: 50}}, connect.CodeUnavailable},
 		"auth failure":                                 {mongo.CommandError{Code: 13, Name: "Unauthorized"}, connect.CodeInternal},
 		"unknown":                                      {errors.New("boom"), connect.CodeInternal},
 	}
