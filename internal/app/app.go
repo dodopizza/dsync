@@ -245,6 +245,9 @@ func runDsync(c *cli.Context) error {
 		SyncMode:                       o.Mode,
 		ReverseRequestedFlag:           o.Reverse,
 		WriteRateLimit:                 o.WriteRateLimit,
+		ReadRetry:                      o.ReadRetry,
+		WriteRetry:                     o.WriteRetry,
+		MetaRetry:                      o.MetaRetry,
 	})
 
 	var wg sync.WaitGroup

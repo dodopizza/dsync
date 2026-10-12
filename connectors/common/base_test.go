@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/adiom-data/dsync/gen/adiom/v1/adiomv1connect"
+	"github.com/adiom-data/dsync/internal/util"
 	"github.com/adiom-data/dsync/protocol/iface"
 	"github.com/adiom-data/dsync/protocol/iface/mocks"
 	"github.com/stretchr/testify/mock"
@@ -153,7 +154,7 @@ func runInitialSync(t *testing.T, coord *mocks.Coordinator, list func(*adiomv1.L
 		impl:               client,
 		maybeOptimizedImpl: client,
 		progressTracker:    NewProgressTracker(&status, t.Context()),
-		settings:           ConnectorSettings{NumParallelCopiers: 1, ResumeTokenUpdateInterval: time.Hour},
+		settings:           ConnectorSettings{NumParallelCopiers: 1, ResumeTokenUpdateInterval: time.Hour, ReadRetry: util.RetryPolicy{Retries: 3, MaxInterval: time.Millisecond}},
 	}
 	task := iface.ReadPlanTask{Id: 1}
 	task.Def.Db, task.Def.Col = "db", "db.col"

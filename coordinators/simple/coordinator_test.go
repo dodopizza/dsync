@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/adiom-data/dsync/protocol/iface"
+	"github.com/adiom-data/dsync/protocol/iface/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,4 +23,16 @@ func TestWaitForFlowDoneReturnsNotifiedError(t *testing.T) {
 	c.NotifyError(errors.New("later"))
 
 	require.ErrorIs(t, c.WaitForFlowDone("f"), historyLost)
+}
+
+func TestFlowGetOrCreateFailsWhenFlowStateUnreadable(t *testing.T) {
+	throttled := errors.New("throttled")
+	s := mocks.NewStatestore(t)
+	s.On("RetrieveObject", flowStateMetadataStore, mock.Anything, mock.Anything).Return(throttled)
+	c := NewSimpleCoordinator(1)
+	c.Setup(context.Background(), nil, s)
+
+	_, err := c.FlowGetOrCreate(iface.FlowOptions{Type: iface.UnidirectionalFlowType})
+
+	require.ErrorIs(t, err, throttled)
 }

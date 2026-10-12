@@ -436,6 +436,8 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 		"driver deadline":          {fmt.Errorf("find: %w", context.DeadlineExceeded), connect.CodeUnavailable},
 		"server maxTimeMS":         {mongo.CommandError{Code: 50, Name: "MaxTimeMSExpired"}, connect.CodeUnavailable},
 		"cancelled flow":           {topology.ConnectionError{Wrapped: context.Canceled}, connect.CodeCanceled},
+		"cosmos throttled command": {mongo.CommandError{Code: 16500, Name: "TooManyRequests"}, connect.CodeUnavailable},
+		"cosmos throttled bulk":    {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 16500}}}}, connect.CodeUnavailable},
 		"auth failure":             {mongo.CommandError{Code: 13, Name: "Unauthorized"}, connect.CodeInternal},
 		"unknown":                  {errors.New("boom"), connect.CodeInternal},
 	}

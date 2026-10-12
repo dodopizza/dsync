@@ -943,6 +943,10 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 					return bwErr
 				}
 			}
+			if bwErrWriteErrors.WriteConcernError != nil {
+				slog.Error(fmt.Sprintf("Write concern error inserting into collection: %v", bwErrWriteErrors.WriteConcernError))
+				return bwErr
+			}
 		} else {
 			// check if the error is a BSONObjectTooLarge error
 			// there could be edge cases such as all documents causing duplicate key errors and server's writeError response gets larger than 16MB
@@ -1255,12 +1259,23 @@ func (c *conn) changeStreamOpts(cursor []byte) *moptions.ChangeStreamOptionsBuil
 	return opts
 }
 
+const cosmosTooManyRequestsCode = 16500
+
+func IsTransientError(err error) bool {
+	if _, isNetErr := errors.AsType[net.Error](err); isNetErr {
+		return true
+	}
+	if serverErr, ok := errors.AsType[mongo.ServerError](err); ok && serverErr.HasErrorCode(cosmosTooManyRequestsCode) {
+		return true
+	}
+	return mongo.IsNetworkError(err) || mongo.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 func maybeUnavailableError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return connect.NewError(connect.CodeCanceled, err)
 	}
-	_, isNetErr := errors.AsType[net.Error](err)
-	if isNetErr || mongo.IsNetworkError(err) || mongo.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if IsTransientError(err) {
 		return connect.NewError(connect.CodeUnavailable, err)
 	}
 	return connect.NewError(connect.CodeInternal, err)

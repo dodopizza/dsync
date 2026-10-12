@@ -57,6 +57,8 @@ type ConnectorSettings struct {
 	SourceDataType            adiomv1.DataType
 	DestinationDataType       adiomv1.DataType
 	WriteRateLimit            int
+	ReadRetry                 util.RetryPolicy
+	WriteRetry                util.RetryPolicy
 }
 
 type maybeOptimizedConnectorService interface {
@@ -635,7 +637,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 					ns := iface.Namespace{Db: task.Def.Db, Col: task.Def.Col}
 					c.progressTracker.TaskStartedProgressUpdate(ns, task.Id)
 
-					backoffConfig := backoff.WithContext(backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3), c.flowCtx)
+					backoffConfig := c.settings.ReadRetry.Backoff(c.flowCtx)
 					err := backoff.Retry(func() error {
 						if docs > 0 {
 							readerProgress.initialSyncDocs.Add(^uint64(docs - 1))
@@ -1164,7 +1166,7 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 					}
 				}
 				ns := dataMsg.Loc
-				backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+				backoffConfig := c.settings.WriteRetry.Backoff(c.flowCtx)
 				if err := backoff.Retry(func() error {
 					_, err := c.maybeOptimizedImpl.WriteUpdates(c.flowCtx, connect.NewRequest(&adiomv1.WriteUpdatesRequest{
 						Namespace: ns,
@@ -1186,7 +1188,7 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 					return err
 				}
 			}
-			backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+			backoffConfig := c.settings.WriteRetry.Backoff(c.flowCtx)
 			if err := backoff.Retry(func() error {
 				_, err := c.maybeOptimizedImpl.WriteData(c.flowCtx, connect.NewRequest(&adiomv1.WriteDataRequest{
 					Namespace: dataMsg.Loc,
@@ -1235,7 +1237,7 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 			}
 		}
 		ns := dataMsgs[0].Loc
-		backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+		backoffConfig := c.settings.WriteRetry.Backoff(c.flowCtx)
 		if err := backoff.Retry(func() error {
 			_, err := c.impl.WriteUpdates(c.flowCtx, connect.NewRequest(&adiomv1.WriteUpdatesRequest{
 				Namespace: ns,
