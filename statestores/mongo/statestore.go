@@ -7,12 +7,16 @@ package mongo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
 	"time"
 
 	connectorMongo "github.com/adiom-data/dsync/connectors/mongo"
+	"github.com/adiom-data/dsync/internal/util"
+	"github.com/adiom-data/dsync/protocol/iface"
+	"github.com/cenkalti/backoff/v4"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -32,6 +36,7 @@ type StateStore struct {
 
 type StateStoreSettings struct {
 	ConnectionString     string
+	Retry                util.RetryPolicy
 	ConnectionStringType connectorMongo.MongoFlavor
 	serverConnectTimeout time.Duration
 	pingTimeout          time.Duration
@@ -102,29 +107,39 @@ func (s *StateStore) getStore(name string) *mongo.Collection {
 	return s.db.Collection(name)
 }
 
+func (s *StateStore) withRetry(op func() error) error {
+	return backoff.Retry(func() error {
+		err := op()
+		if err != nil && !connectorMongo.IsTransientError(err) {
+			return backoff.Permanent(err)
+		}
+		return err
+	}, s.settings.Retry.Backoff(s.ctx))
+}
+
 func (s *StateStore) PersistObject(storeName string, id interface{}, obj interface{}) error {
 	coll := s.getStore(storeName)
-	_, err := coll.ReplaceOne(s.ctx, bson.M{"_id": id}, obj, options.Replace().SetUpsert(true))
-	return err
+	return s.withRetry(func() error {
+		_, err := coll.ReplaceOne(s.ctx, bson.M{"_id": id}, obj, options.Replace().SetUpsert(true))
+		return err
+	})
 }
 
 func (s *StateStore) RetrieveObject(storeName string, id interface{}, obj interface{}) error {
 	coll := s.getStore(storeName)
-	result := coll.FindOne(s.ctx, bson.M{"_id": id})
-	if result.Err() != nil {
-		return result.Err()
+	err := s.withRetry(func() error {
+		return coll.FindOne(s.ctx, bson.M{"_id": id}).Decode(obj)
+	})
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return iface.ErrNotFound
 	}
-
-	err := result.Decode(obj)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func (s *StateStore) DeleteObject(storeName string, id interface{}) error {
 	coll := s.getStore(storeName)
-	_, err := coll.DeleteOne(s.ctx, bson.M{"_id": id})
-	return err
+	return s.withRetry(func() error {
+		_, err := coll.DeleteOne(s.ctx, bson.M{"_id": id})
+		return err
+	})
 }

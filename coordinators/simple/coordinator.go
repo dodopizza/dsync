@@ -175,6 +175,9 @@ func (c *Simple) FlowGetOrCreate(o iface.FlowOptions) (iface.FlowID, error) {
 	fid := generateFlowID(o)
 	fdet_temp := FlowDetails{}
 	err_persisted_state := c.s.RetrieveObject(flowStateMetadataStore, fid, &fdet_temp)
+	if err_persisted_state != nil && !errors.Is(err_persisted_state, iface.ErrNotFound) {
+		return iface.FlowID(""), fmt.Errorf("failed to read flow state %v: %w", fid, err_persisted_state)
+	}
 
 	// Check flow type and error out if not unidirectional
 	if o.Type != iface.UnidirectionalFlowType {

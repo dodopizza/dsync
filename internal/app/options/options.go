@@ -6,8 +6,10 @@
 package options
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/adiom-data/dsync/internal/util"
 	"github.com/urfave/cli/v2"
 )
 
@@ -45,6 +47,9 @@ type Options struct {
 	Mode                           string
 
 	WriteRateLimit int
+	ReadRetry      util.RetryPolicy
+	WriteRetry     util.RetryPolicy
+	MetaRetry      util.RetryPolicy
 }
 
 // works with a copy of the struct to avoid modifying the original
@@ -83,6 +88,14 @@ func NewFromCLIContext(c *cli.Context) (Options, error) {
 	o.Reverse = c.Bool("reverse")
 
 	o.WriteRateLimit = c.Int("write-rate-limit")
+	o.ReadRetry = util.RetryPolicy{Retries: c.Uint64("read-retries"), MaxInterval: c.Duration("read-retry-max-interval")}
+	o.WriteRetry = util.RetryPolicy{Retries: c.Uint64("write-retries"), MaxInterval: c.Duration("write-retry-max-interval")}
+	o.MetaRetry = util.RetryPolicy{Retries: c.Uint64("meta-retries"), MaxInterval: c.Duration("meta-retry-max-interval")}
+	for _, scope := range []string{"read", "write", "meta"} {
+		if c.Duration(scope+"-retry-max-interval") <= 0 {
+			return o, fmt.Errorf("--%s-retry-max-interval must be positive", scope)
+		}
+	}
 
 	return o, nil
 }

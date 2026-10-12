@@ -5,7 +5,12 @@
  */
 package iface
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var ErrNotFound = errors.New("object not found")
 
 type Statestore interface {
 	// General

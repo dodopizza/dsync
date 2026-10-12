@@ -18,6 +18,7 @@ import (
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/adiom-data/dsync/gen/adiom/v1/adiomv1connect"
 	"github.com/adiom-data/dsync/internal/app/options"
+	"github.com/adiom-data/dsync/internal/util"
 	"github.com/adiom-data/dsync/protocol/iface"
 	statestoreMongo "github.com/adiom-data/dsync/statestores/mongo"
 	statestoreTemp "github.com/adiom-data/dsync/statestores/temp"
@@ -82,6 +83,9 @@ type RunnerLocalSettings struct {
 	MultinamespaceBatcher          bool
 
 	WriteRateLimit int
+	ReadRetry      util.RetryPolicy
+	WriteRetry     util.RetryPolicy
+	MetaRetry      util.RetryPolicy
 }
 
 const (
@@ -114,6 +118,8 @@ func NewRunnerLocal(settings RunnerLocalSettings) *RunnerLocal {
 		SourceDataType:            settings.SrcDataType,
 		DestinationDataType:       settings.DstDataType,
 		WriteRateLimit:            settings.WriteRateLimit,
+		ReadRetry:                 settings.ReadRetry,
+		WriteRetry:                settings.WriteRetry,
 	}
 	if settings.LoadLevel != "" {
 		btc := GetBaseThreadCount(settings.LoadLevel)
@@ -138,7 +144,7 @@ func NewRunnerLocal(settings RunnerLocalSettings) *RunnerLocal {
 
 	//XXX: implement and use a function isStateful() from connectors to determine if a connector is stateful (although we may not care too much about it for SaaS deployments)
 	if settings.StateStoreConnString != "" { //if the statestore is explicitly set, use it
-		r.statestore = statestoreMongo.NewMongoStateStore(statestoreMongo.StateStoreSettings{ConnectionString: settings.StateStoreConnString})
+		r.statestore = statestoreMongo.NewMongoStateStore(statestoreMongo.StateStoreSettings{ConnectionString: settings.StateStoreConnString, Retry: settings.MetaRetry})
 	} else {
 		// otherwise, use a stub statestore because no statestore is needed
 		r.statestore = statestoreTemp.NewTempStateStore()

@@ -7,8 +7,9 @@ package temp
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+
+	"github.com/adiom-data/dsync/protocol/iface"
 )
 
 /**
@@ -36,7 +37,7 @@ func (s *StateStore) PersistObject(storeName string, id interface{}, obj interfa
 }
 
 func (s *StateStore) RetrieveObject(storeName string, id interface{}, obj interface{}) error {
-	return fmt.Errorf("not implemented")
+	return iface.ErrNotFound
 }
 
 func (s *StateStore) DeleteObject(storeName string, id interface{}) error {
