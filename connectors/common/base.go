@@ -39,6 +39,7 @@ import (
 const (
 	progressReportingIntervalSec = 10
 	resumeTokenCheckTimeout      = 30 * time.Second
+	mongoDBType                  = "MongoDB"
 )
 
 type Teardownable interface {
@@ -68,7 +69,8 @@ type connector struct {
 	impl               adiomv1connect.ConnectorServiceClient
 	maybeOptimizedImpl maybeOptimizedConnectorService
 
-	desc string
+	desc   string
+	dbType string
 
 	id             iface.ConnectorID
 	t              iface.Transport
@@ -285,29 +287,34 @@ func (c *connector) failFlow(stage string, err error) {
 }
 
 func (c *connector) watchResumeToken(initialSyncDone <-chan struct{}, namespaces []string, token []byte) {
-	ticker := time.NewTicker(c.settings.ResumeTokenCheckInterval)
-	defer ticker.Stop()
-	for {
+	ctx, cancel := context.WithCancel(c.flowCtx)
+	defer cancel()
+	go func() {
 		select {
-		case <-c.flowCtx.Done():
-			return
 		case <-initialSyncDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	tick := time.Tick(c.settings.ResumeTokenCheckInterval)
+	for {
+		if err := c.checkResumeToken(ctx, namespaces, token); err != nil {
+			c.failFlow("resume token check during initial sync", err)
 			return
-		case <-ticker.C:
-			if err := c.checkResumeToken(namespaces, token); err != nil {
-				c.failFlow("resume token check during initial sync", err)
-				return
-			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
 		}
 	}
 }
 
-func (c *connector) checkResumeToken(namespaces []string, token []byte) error {
-	ctx, cancel := context.WithTimeout(c.flowCtx, resumeTokenCheckTimeout)
+func (c *connector) checkResumeToken(ctx context.Context, namespaces []string, token []byte) error {
+	probeCtx, cancel := context.WithTimeout(ctx, resumeTokenCheckTimeout)
 	defer cancel()
-	res, err := c.impl.StreamUpdates(ctx, connect.NewRequest(&adiomv1.StreamUpdatesRequest{
+	res, err := c.impl.StreamLSN(probeCtx, connect.NewRequest(&adiomv1.StreamLSNRequest{
 		Namespaces: namespaces,
-		Type:       c.settings.SourceDataType,
 		Cursor:     token,
 	}))
 	if err == nil {
@@ -315,16 +322,16 @@ func (c *connector) checkResumeToken(namespaces []string, token []byte) error {
 		res.Receive()
 		err = res.Err()
 	}
-	if err == nil {
+	switch {
+	case err == nil, ctx.Err() != nil:
 		return nil
-	}
-	if strings.Contains(err.Error(), "ChangeStreamHistoryLost") {
+	case strings.Contains(err.Error(), "ChangeStreamHistoryLost"):
 		return err
+	case probeCtx.Err() != nil:
+		slog.Info(fmt.Sprintf("Resume token check inconclusive: no change events within %v", resumeTokenCheckTimeout))
+	default:
+		slog.Warn(fmt.Sprintf("Resume token check failed, will retry: %v", err))
 	}
-	if ctx.Err() != nil {
-		return nil
-	}
-	slog.Warn(fmt.Sprintf("Resume token check failed, will retry: %v", err))
 	return nil
 }
 
@@ -430,6 +437,7 @@ func (c *connector) Setup(ctx context.Context, t iface.Transport) error {
 	}
 
 	capabilities := res.Msg.GetCapabilities()
+	c.dbType = res.Msg.GetDbType()
 
 	connectorType := iface.ConnectorType{
 		DbType:  res.Msg.GetDbType(),
@@ -585,8 +593,14 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 		}
 	}()
 
-	if options.Mode != iface.SyncModeInitialSync && c.settings.ResumeTokenCheckInterval > 0 && len(tasks) > 0 {
-		go c.watchResumeToken(initialSyncDone, streamUpdatesNamespaces, initialResumeToken)
+	resumeTokenWatchDone := make(chan struct{})
+	if options.Mode != iface.SyncModeInitialSync && c.dbType == mongoDBType && c.settings.ResumeTokenCheckInterval > 0 && len(tasks) > 0 {
+		go func() {
+			defer close(resumeTokenWatchDone)
+			c.watchResumeToken(initialSyncDone, streamUpdatesNamespaces, initialResumeToken)
+		}()
+	} else {
+		close(resumeTokenWatchDone)
 	}
 
 	var initialSyncFailed atomic.Bool
@@ -770,6 +784,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 	go func() {
 		//wait for the initial sync to finish
 		<-initialSyncDone
+		<-resumeTokenWatchDone
 		defer close(changeStreamDone)
 		if options.Mode == iface.SyncModeInitialSync {
 			return

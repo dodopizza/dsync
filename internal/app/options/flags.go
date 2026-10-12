@@ -166,7 +166,7 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 		}),
 		altsrc.NewDurationFlag(&cli.DurationFlag{
 			Name:     "cdc-resume-token-check-interval",
-			Usage:    "during initial sync, how often to verify the CDC start point is still in the source oplog (fail fast if lost, 0 disables)",
+			Usage:    "MongoDB sources: during initial sync, how often to verify the CDC start point is still in the source oplog (fail fast if lost, 0 disables)",
 			Value:    time.Hour,
 			Required: false,
 		}),
