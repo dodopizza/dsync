@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -204,7 +205,7 @@ func partialU(t *testing.T, id string, data bson.M, unset ...string) *adiomv1.Up
 
 func TestBuildBulkModels_Empty(t *testing.T) {
 	c := &conn{}
-	models, ordered, err := c.buildBulkModels(nil)
+	models, ordered, err := c.buildBulkModels("db.col", nil)
 	require.NoError(t, err)
 	assert.Empty(t, models)
 	assert.False(t, ordered)
@@ -212,7 +213,7 @@ func TestBuildBulkModels_Empty(t *testing.T) {
 
 func TestBuildBulkModels_AllUniqueStaysUnordered(t *testing.T) {
 	c := &conn{}
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"x": 1}),
 		insertU(t, "b", bson.M{"x": 2}),
 		deleteU(t, "c"),
@@ -224,7 +225,7 @@ func TestBuildBulkModels_AllUniqueStaysUnordered(t *testing.T) {
 
 func TestBuildBulkModels_DedupKeepsLast(t *testing.T) {
 	c := &conn{}
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"v": 1}),
 		insertU(t, "a", bson.M{"v": 2}),
 		insertU(t, "a", bson.M{"v": 3}),
@@ -241,7 +242,7 @@ func TestBuildBulkModels_DedupKeepsLast(t *testing.T) {
 
 func TestBuildBulkModels_DeleteAfterInsertsKeepsOnlyDelete(t *testing.T) {
 	c := &conn{}
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"v": 1}),
 		insertU(t, "a", bson.M{"v": 2}),
 		deleteU(t, "a"),
@@ -255,7 +256,7 @@ func TestBuildBulkModels_DeleteAfterInsertsKeepsOnlyDelete(t *testing.T) {
 
 func TestBuildBulkModels_PartialLastTriggersOrdered(t *testing.T) {
 	c := &conn{}
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"v": 1}),
 		partialU(t, "a", bson.M{"w": 2}),
 	})
@@ -271,7 +272,7 @@ func TestBuildBulkModels_PartialLastTriggersOrdered(t *testing.T) {
 
 func TestBuildBulkModels_PartialLastOrderedPreservesChronology(t *testing.T) {
 	c := &conn{}
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"v": 1}),
 		partialU(t, "a", bson.M{"w": 2}),
 		insertU(t, "a", bson.M{"v": 3}),
@@ -292,7 +293,7 @@ func TestBuildBulkModels_PartialOnlyIdInDataSkipped(t *testing.T) {
 	c := &conn{}
 	// Partial with data that contains only _id (stripped to nil) and no unset -> no-op.
 	u := partialU(t, "a", bson.M{"_id": "a"})
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{u})
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	assert.Empty(t, models)
@@ -301,7 +302,7 @@ func TestBuildBulkModels_PartialOnlyIdInDataSkipped(t *testing.T) {
 func TestBuildBulkModels_PartialUnsetOnly(t *testing.T) {
 	c := &conn{}
 	u := partialU(t, "a", nil, "foo", "bar")
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{u})
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	require.Len(t, models, 1)
@@ -318,7 +319,7 @@ func TestBuildBulkModels_PartialUnsetOnly(t *testing.T) {
 func TestBuildBulkModels_PartialUnsetFiltersIdFields(t *testing.T) {
 	c := &conn{}
 	u := partialU(t, "a", bson.M{"x": 1}, "_id", "foo")
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{u})
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	require.Len(t, models, 1)
@@ -335,7 +336,7 @@ func TestBuildBulkModels_PartialUnsetOnlyIdBecomesNoop(t *testing.T) {
 	c := &conn{}
 	// Unset only contains _id which gets filtered -> empty update -> skipped.
 	u := partialU(t, "a", nil, "_id")
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{u})
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	assert.Empty(t, models)
@@ -353,7 +354,7 @@ func TestBuildBulkModels_FullDocumentKeyDedupesByComposite(t *testing.T) {
 			Data: mustMarshal(t, bson.M{"v": v}),
 		}
 	}
-	models, ordered, err := c.buildBulkModels([]*adiomv1.Update{
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		mk("a", "s1", 1),
 		mk("a", "s2", 2), // same _id, different shard -> distinct doc
 		mk("a", "s1", 3), // same composite as first -> dedup replaces it
@@ -366,7 +367,7 @@ func TestBuildBulkModels_FullDocumentKeyDedupesByComposite(t *testing.T) {
 
 func TestBuildBulkModels_ErrorPropagates(t *testing.T) {
 	c := &conn{}
-	_, _, err := c.buildBulkModels([]*adiomv1.Update{{Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT}})
+	_, _, err := c.buildBulkModels("db.col", []*adiomv1.Update{{Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT}})
 	assert.ErrorContains(t, err, "unexpected empty id")
 }
 
@@ -460,4 +461,56 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 			assert.Equal(t, tc.code, connect.CodeOf(maybeUnavailableError(tc.err)))
 		})
 	}
+}
+
+func TestCosmosValidTTL_ReplacesValuesCosmosRejects(t *testing.T) {
+	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
+	for _, ttl := range []interface{}{int32(0), int32(-2), int64(-1523511), float64(-2), float64(0)} {
+		raw := bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: "x"}, {Key: "ttl", Value: ttl}, {Key: "a", Value: 1}}))
+		out, err := c.cosmosValidTTL("db.col", raw, nil)
+		require.NoError(t, err)
+		var doc bson.D
+		require.NoError(t, bson.Unmarshal(out, &doc))
+		assert.Equal(t, bson.D{{Key: "_id", Value: "x"}, {Key: "ttl", Value: int32(-1)}, {Key: "a", Value: int32(1)}}, doc, "ttl %v", ttl)
+	}
+}
+
+func TestCosmosValidTTL_KeepsValuesCosmosAccepts(t *testing.T) {
+	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
+	for _, doc := range []bson.M{
+		{"ttl": int32(-1)}, {"ttl": int64(-1)}, {"ttl": float64(-1)}, {"ttl": int64(31622400)}, {"ttl": 5.5}, {"ttl": -0.5}, {"ttl": math.NaN()}, {"ttl": "x"}, {"a": 1}, {"n": bson.M{"ttl": -5}},
+	} {
+		raw := bson.Raw(mustMarshal(t, doc))
+		out, err := c.cosmosValidTTL("db.col", raw, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []byte(raw), []byte(out), "doc %v", doc)
+	}
+}
+
+func TestCosmosValidTTL_DisabledKeepsDocument(t *testing.T) {
+	raw := bson.Raw(mustMarshal(t, bson.M{"ttl": int32(-5)}))
+	out, err := (&conn{}).cosmosValidTTL("db.col", raw, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(raw), []byte(out))
+}
+
+func TestBuildBulkModels_ReplacesInvalidCosmosTTL(t *testing.T) {
+	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
+	models, _, err := c.buildBulkModels("db.col", []*adiomv1.Update{
+		insertU(t, "a", bson.M{"ttl": int32(-411077)}),
+		partialU(t, "b", bson.M{"ttl": int32(0)}),
+	})
+	require.NoError(t, err)
+	require.Len(t, models, 2)
+	var replacement, set bson.M
+	for _, m := range models {
+		switch m := m.(type) {
+		case *mongo.ReplaceOneModel:
+			require.NoError(t, bson.Unmarshal(m.Replacement.(bson.Raw), &replacement))
+		case *mongo.UpdateOneModel:
+			require.NoError(t, bson.Unmarshal(m.Update.(bson.M)["$set"].(bson.Raw), &set))
+		}
+	}
+	assert.Equal(t, int32(-1), replacement["ttl"])
+	assert.Equal(t, int32(-1), set["ttl"])
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"regexp"
 	"slices"
@@ -44,6 +45,7 @@ type ConnectorSettings struct {
 	SkipBatchOverwrite         bool
 	FullDocumentKey            bool
 	PageBufferTTL              time.Duration
+	ReplaceInvalidCosmosTTL    bool
 
 	Query string // query filter, as a v2 Extended JSON string, e.g., '{\"x\":{\"$gt\":1}}'"
 }
@@ -79,11 +81,12 @@ type conn struct {
 	settings ConnectorSettings
 	flavor   MongoFlavor
 
-	nextCursorID atomic.Int64
-	ctx          context.Context
-	cancel       context.CancelFunc
-	buffersMutex sync.RWMutex
-	buffers      map[int64]buffer
+	nextCursorID    atomic.Int64
+	replacedTTLDocs atomic.Int64
+	ctx             context.Context
+	cancel          context.CancelFunc
+	buffersMutex    sync.RWMutex
+	buffers         map[int64]buffer
 
 	query bson.D
 }
@@ -995,7 +998,11 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 	}
 	var batch []interface{}
 	for _, data := range r.Msg.GetData() {
-		batch = append(batch, bson.Raw(data))
+		doc, err := c.cosmosValidTTL(r.Msg.GetNamespace(), bson.Raw(data), nil)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+		batch = append(batch, doc)
 		if c.settings.WriterMaxBatchSize > 0 && len(batch) >= c.settings.WriterMaxBatchSize {
 			err := insertBatchOverwrite(ctx, col, batch, c.settings.SkipBatchOverwrite)
 			if err != nil {
@@ -1075,13 +1082,50 @@ func stripIdFields(raw bson.Raw, idFilter bson.D) (bson.Raw, error) {
 	return out, nil
 }
 
+func (c *conn) cosmosValidTTL(namespace string, raw bson.Raw, idFilter bson.D) (bson.Raw, error) {
+	if !c.settings.ReplaceInvalidCosmosTTL || raw == nil {
+		return raw, nil
+	}
+	ttl, err := raw.LookupErr("ttl")
+	if err != nil {
+		return raw, nil
+	}
+	if n, ok := ttl.AsFloat64OK(); !ok || n != math.Trunc(n) || n > 0 || n == -1 {
+		return raw, nil
+	}
+	elems, err := raw.Elements()
+	if err != nil {
+		return nil, fmt.Errorf("cosmosValidTTL: malformed bson: %w", err)
+	}
+	doc := make(bson.D, 0, len(elems))
+	for _, elem := range elems {
+		if elem.Key() == "ttl" {
+			doc = append(doc, bson.E{Key: "ttl", Value: int32(-1)})
+			continue
+		}
+		doc = append(doc, bson.E{Key: elem.Key(), Value: elem.Value()})
+	}
+	out, err := bson.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("cosmosValidTTL: marshal doc: %w", err)
+	}
+	id := any(idFilter)
+	if idFilter == nil {
+		id = raw.Lookup("_id")
+	}
+	if count := c.replacedTTLDocs.Add(1); count <= 100 || count%10000 == 0 {
+		slog.Warn(fmt.Sprintf("Replacing ttl %v rejected by Cosmos DB with -1 in %s, id %v (%d replacements so far)", ttl, namespace, id, count))
+	}
+	return out, nil
+}
+
 // buildBulkModels converts a sequence of updates into a slice of mongo.WriteModel
 // ready for BulkWrite, along with whether the batch must run ordered.
 //
 // Iterates updates in reverse so that per-ID dedup keeps the last (chronological) operation.
 // When the last operation for an ID is a partial update, earlier operations for the same ID
 // are kept as ordered models so they execute in sequence before the unordered batch.
-func (c *conn) buildBulkModels(updates []*adiomv1.Update) ([]mongo.WriteModel, bool, error) {
+func (c *conn) buildBulkModels(namespace string, updates []*adiomv1.Update) ([]mongo.WriteModel, bool, error) {
 	var models []mongo.WriteModel
 	var orderedModels []mongo.WriteModel
 
@@ -1103,7 +1147,11 @@ func (c *conn) buildBulkModels(updates []*adiomv1.Update) ([]mongo.WriteModel, b
 
 		switch update.GetType() {
 		case adiomv1.UpdateType_UPDATE_TYPE_INSERT, adiomv1.UpdateType_UPDATE_TYPE_UPDATE:
-			model := mongo.NewReplaceOneModel().SetFilter(idFilter).SetReplacement(bson.Raw(update.GetData())).SetUpsert(true)
+			replacement, err := c.cosmosValidTTL(namespace, bson.Raw(update.GetData()), idFilter)
+			if err != nil {
+				return nil, false, err
+			}
+			model := mongo.NewReplaceOneModel().SetFilter(idFilter).SetReplacement(replacement).SetUpsert(true)
 			if isNew {
 				models = append(models, model)
 			} else if lastType == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
@@ -1120,6 +1168,10 @@ func (c *conn) buildBulkModels(updates []*adiomv1.Update) ([]mongo.WriteModel, b
 			theUpdate := bson.M{}
 			if update.GetData() != nil {
 				stripped, err := stripIdFields(bson.Raw(update.GetData()), idFilter)
+				if err != nil {
+					return nil, false, err
+				}
+				stripped, err = c.cosmosValidTTL(namespace, stripped, idFilter)
 				if err != nil {
 					return nil, false, err
 				}
@@ -1169,7 +1221,7 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("namespace should be fully qualified"))
 	}
 
-	finalModels, ordered, err := c.buildBulkModels(r.Msg.GetUpdates())
+	finalModels, ordered, err := c.buildBulkModels(r.Msg.GetNamespace(), r.Msg.GetUpdates())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
