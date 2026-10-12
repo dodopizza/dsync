@@ -320,18 +320,18 @@ func (c *conn) sampleIDs(ctx context.Context, col *mongo.Collection, numSamples 
 	results := make([]sampleResult, numSamples)
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.SetLimit(c.documentDBSamplingFanout())
-	for i := int64(0); i < numSamples; i++ {
-		i := i
+	for i := range numSamples {
 		eg.Go(func() error {
 			res, err := col.Aggregate(ctx, samplePipeline(1, c.query))
 			if err != nil {
 				return fmt.Errorf("error getting sample %v: %w", i, err)
 			}
 			defer res.Close(ctx)
-			if res.Next(ctx) {
-				id := res.Current.Lookup("_id")
-				results[i] = sampleResult{id: id, key: hex.EncodeToString(id.Value)}
+			if !res.Next(ctx) {
+				return res.Err()
 			}
+			id := res.Current.Lookup("_id")
+			results[i] = sampleResult{id: id, key: hex.EncodeToString(id.Value)}
 			return nil
 		})
 	}

@@ -201,6 +201,123 @@ func findSmallestID(ctx context.Context, col *mongo.Collection, query bson.D) (b
 	return bson.RawValue{}, nil
 }
 
+var idTypeAliases = map[int]bson.A{
+	1:  {"minKey"},
+	2:  {"null", "undefined"},
+	3:  {"number"},
+	4:  {"string", "symbol"},
+	5:  {"object"},
+	7:  {"binData"},
+	8:  {"objectId"},
+	9:  {"bool"},
+	10: {"date"},
+	11: {"timestamp"},
+	12: {"regex"},
+	13: {"javascript"},
+	14: {"javascriptWithScope", "dbPointer"},
+	15: {"maxKey"},
+}
+
+func andFilter(a, b bson.D) bson.D {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 {
+		return b
+	}
+	return bson.D{{"$and", bson.A{a, b}}}
+}
+
+func (c *conn) planCollection(ctx context.Context, col *mongo.Collection, namespace string) ([]*adiomv1.Partition, error) {
+	lowest, err := findSmallestID(ctx, col, c.query)
+	if err != nil {
+		return nil, fmt.Errorf("err finding smallest id: %w", err)
+	}
+	high, err := findLargestID(ctx, col, c.query)
+	if err != nil {
+		return nil, fmt.Errorf("err finding largest id: %w", err)
+	}
+
+	count, err := col.EstimatedDocumentCount(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mixed := bsonTypeSortOrder(lowest.Type) != bsonTypeSortOrder(high.Type)
+	var ids []bson.RawValue
+	if count < c.settings.TargetDocCountPerPartition*2 {
+		if !mixed {
+			return []*adiomv1.Partition{{
+				Namespace:      namespace,
+				EstimatedCount: uint64(count),
+				Cursor:         EncodeCursor(bson.RawValue{}, high),
+			}}, nil
+		}
+	} else {
+		numSamples := (count / c.settings.TargetDocCountPerPartition) * int64(c.settings.SampleFactor)
+		if numSamples*21 >= count {
+			return nil, fmt.Errorf("too many samples requested (%v of %v)- adjust sample factor or target documents per partition", numSamples, count)
+		}
+		if numSamples > 1000000 {
+			slog.Warn("More than 1000000 samples requested", "samples", numSamples)
+		}
+		slog.Debug("Getting samples for namespace", "namespace", namespace, "samples", numSamples)
+		ids, err = c.sampleIDs(ctx, col, numSamples)
+		if err != nil {
+			return nil, fmt.Errorf("error getting %v samples for partition: %w", numSamples, err)
+		}
+	}
+	if !mixed {
+		return c.rangePartitions(namespace, ids, high), nil
+	}
+
+	var partitions []*adiomv1.Partition
+	for order := bsonTypeSortOrder(lowest.Type); order <= bsonTypeSortOrder(high.Type); order++ {
+		aliases, ok := idTypeAliases[order]
+		if !ok {
+			continue
+		}
+		typeHigh, err := findLargestID(ctx, col, andFilter(bson.D{{"_id", bson.D{{"$type", aliases}}}}, c.query))
+		if err != nil {
+			return nil, fmt.Errorf("err finding largest id of types %v: %w", aliases, err)
+		}
+		if typeHigh.IsZero() {
+			continue
+		}
+		var typeIDs []bson.RawValue
+		for _, id := range ids {
+			if bsonTypeSortOrder(id.Type) == order {
+				typeIDs = append(typeIDs, id)
+			}
+		}
+		partitions = append(partitions, c.rangePartitions(namespace, typeIDs, typeHigh)...)
+	}
+	return partitions, nil
+}
+
+func (c *conn) rangePartitions(namespace string, ids []bson.RawValue, high bson.RawValue) []*adiomv1.Partition {
+	var partitions []*adiomv1.Partition
+	factorCount := c.settings.SampleFactor / 2
+	var low bson.RawValue
+	for _, id := range ids {
+		if factorCount > 0 {
+			factorCount -= 1
+			continue
+		}
+		factorCount = c.settings.SampleFactor - 1
+		partitions = append(partitions, &adiomv1.Partition{
+			Namespace:      namespace,
+			EstimatedCount: uint64(c.settings.TargetDocCountPerPartition),
+			Cursor:         EncodeCursor(low, id),
+		})
+		low = id
+	}
+	return append(partitions, &adiomv1.Partition{
+		Namespace:      namespace,
+		EstimatedCount: uint64(c.settings.TargetDocCountPerPartition),
+		Cursor:         EncodeCursor(low, high),
+	})
+}
+
 // GeneratePlan implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.GeneratePlanRequest]) (*connect.Response[adiomv1.GeneratePlanResponse], error) {
 	partitions, err := NamespacePartitions(ctx, r.Msg.GetNamespaces(), c.client)
@@ -264,63 +381,12 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		eg.Go(func() error {
 			ns, _ := ToNS(partition.Namespace)
 			col := c.client.Database(ns.Db).Collection(ns.Col)
-
-			lowest, err := findSmallestID(ctx, col, c.query)
-			if err != nil {
-				return fmt.Errorf("err finding smallest id: %w", err)
-			}
-			high, err := findLargestID(ctx, col, c.query)
-			if err != nil {
-				return fmt.Errorf("err finding largest id: %w", err)
-			}
-			if !lowest.IsZero() && !high.IsZero() && lowest.Type != high.Type {
-				return fmt.Errorf("mixed _id types not supported in %v: found %v and %v", partition.Namespace, lowest.Type, high.Type)
-			}
-
-			count, err := col.EstimatedDocumentCount(ctx)
+			planned, err := c.planCollection(ctx, col, partition.GetNamespace())
 			if err != nil {
 				return err
 			}
-			if count < c.settings.TargetDocCountPerPartition*2 {
-				ch <- &adiomv1.Partition{
-					Namespace:      partition.GetNamespace(),
-					EstimatedCount: uint64(count),
-					Cursor:         EncodeCursor(bson.RawValue{}, high),
-				}
-				return nil
-			}
-			numSamples := (count / c.settings.TargetDocCountPerPartition) * int64(c.settings.SampleFactor)
-			if numSamples*21 >= count {
-				return fmt.Errorf("too many samples requested (%v of %v)- adjust sample factor or target documents per partition", numSamples, count)
-			}
-			if numSamples > 1000000 {
-				slog.Warn("More than 1000000 samples requested", "samples", numSamples)
-			}
-			slog.Debug("Getting samples for namespace", "namespace", partition.GetNamespace(), "samples", numSamples)
-			ids, err := c.sampleIDs(ctx, col, numSamples)
-			if err != nil {
-				return fmt.Errorf("error getting %v samples for partition: %w", numSamples, err)
-			}
-			var factorCount = c.settings.SampleFactor / 2
-			var low bson.RawValue
-			for _, id := range ids {
-				if factorCount > 0 {
-					factorCount -= 1
-					continue
-				}
-				factorCount = c.settings.SampleFactor - 1
-				high := id
-				ch <- &adiomv1.Partition{
-					Namespace:      partition.GetNamespace(),
-					EstimatedCount: uint64(c.settings.TargetDocCountPerPartition),
-					Cursor:         EncodeCursor(low, high),
-				}
-				low = high
-			}
-			ch <- &adiomv1.Partition{
-				Namespace:      partition.GetNamespace(),
-				EstimatedCount: uint64(c.settings.TargetDocCountPerPartition),
-				Cursor:         EncodeCursor(low, high),
+			for _, p := range planned {
+				ch <- p
 			}
 			return nil
 		})
@@ -473,10 +539,7 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 		}
 		c.buffersMutex.Unlock()
 
-		filter := createFindFilterFromCursor(r.Msg.GetPartition().GetCursor())
-		if len(c.query) > 0 {
-			filter = bson.D{{"$and", bson.A{filter, c.query}}}
-		}
+		filter := andFilter(createFindFilterFromCursor(r.Msg.GetPartition().GetCursor()), c.query)
 
 		cursor, err := collection.Find(ctx, filter)
 		if err != nil {

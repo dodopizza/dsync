@@ -377,3 +377,23 @@ func TestSamplePipeline_NoQuery(t *testing.T) {
 		{{"$project", bson.D{{"_id", 1}}}},
 	}, samplePipeline(1, nil))
 }
+
+func TestIDTypeAliasesCoverEverySortOrderOfAnID(t *testing.T) {
+	for _, typ := range []bson.Type{
+		bson.TypeDouble, bson.TypeString, bson.TypeEmbeddedDocument, bson.TypeBinary, bson.TypeUndefined,
+		bson.TypeObjectID, bson.TypeBoolean, bson.TypeDateTime, bson.TypeNull, bson.TypeRegex, bson.TypeDBPointer,
+		bson.TypeJavaScript, bson.TypeSymbol, bson.TypeCodeWithScope, bson.TypeInt32, bson.TypeTimestamp,
+		bson.TypeInt64, bson.TypeDecimal128, bson.TypeMinKey, bson.TypeMaxKey,
+	} {
+		assert.Contains(t, idTypeAliases, bsonTypeSortOrder(typ), typ.String())
+	}
+}
+
+func TestAndFilter(t *testing.T) {
+	a := bson.D{{"_id", bson.D{{"$gt", 1}}}}
+	b := bson.D{{"_id", bson.D{{"$type", "string"}}}}
+	assert.Equal(t, a, andFilter(a, nil))
+	assert.Equal(t, b, andFilter(bson.D{}, b))
+	assert.Equal(t, bson.D{{"$and", bson.A{a, b}}}, andFilter(a, b))
+	assert.NotNil(t, andFilter(bson.D{}, nil))
+}
