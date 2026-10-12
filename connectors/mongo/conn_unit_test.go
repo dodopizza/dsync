@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -464,7 +465,7 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 
 func TestCosmosValidTTL_ReplacesValuesCosmosRejects(t *testing.T) {
 	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
-	for _, ttl := range []interface{}{int32(0), int32(-2), int64(-1523511), -0.5} {
+	for _, ttl := range []interface{}{int32(0), int32(-2), int64(-1523511), float64(-2), float64(0)} {
 		raw := bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: "x"}, {Key: "ttl", Value: ttl}, {Key: "a", Value: 1}}))
 		out, err := c.cosmosValidTTL("db.col", raw, nil)
 		require.NoError(t, err)
@@ -477,7 +478,7 @@ func TestCosmosValidTTL_ReplacesValuesCosmosRejects(t *testing.T) {
 func TestCosmosValidTTL_KeepsValuesCosmosAccepts(t *testing.T) {
 	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
 	for _, doc := range []bson.M{
-		{"ttl": int32(-1)}, {"ttl": int64(31622400)}, {"ttl": 5.5}, {"ttl": "x"}, {"a": 1}, {"n": bson.M{"ttl": -5}},
+		{"ttl": int32(-1)}, {"ttl": int64(-1)}, {"ttl": float64(-1)}, {"ttl": int64(31622400)}, {"ttl": 5.5}, {"ttl": -0.5}, {"ttl": math.NaN()}, {"ttl": "x"}, {"a": 1}, {"n": bson.M{"ttl": -5}},
 	} {
 		raw := bson.Raw(mustMarshal(t, doc))
 		out, err := c.cosmosValidTTL("db.col", raw, nil)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"regexp"
 	"slices"
@@ -80,11 +81,12 @@ type conn struct {
 	settings ConnectorSettings
 	flavor   MongoFlavor
 
-	nextCursorID atomic.Int64
-	ctx          context.Context
-	cancel       context.CancelFunc
-	buffersMutex sync.RWMutex
-	buffers      map[int64]buffer
+	nextCursorID    atomic.Int64
+	replacedTTLDocs atomic.Int64
+	ctx             context.Context
+	cancel          context.CancelFunc
+	buffersMutex    sync.RWMutex
+	buffers         map[int64]buffer
 
 	query bson.D
 }
@@ -1088,7 +1090,7 @@ func (c *conn) cosmosValidTTL(namespace string, raw bson.Raw, idFilter bson.D) (
 	if err != nil {
 		return raw, nil
 	}
-	if n, ok := ttl.AsFloat64OK(); !ok || n > 0 || n == -1 {
+	if n, ok := ttl.AsFloat64OK(); !ok || n != math.Trunc(n) || n > 0 || n == -1 {
 		return raw, nil
 	}
 	elems, err := raw.Elements()
@@ -1111,7 +1113,9 @@ func (c *conn) cosmosValidTTL(namespace string, raw bson.Raw, idFilter bson.D) (
 	if idFilter == nil {
 		id = raw.Lookup("_id")
 	}
-	slog.Warn(fmt.Sprintf("Replaced ttl %v rejected by Cosmos DB with -1 in %s, id %v", ttl, namespace, id))
+	if count := c.replacedTTLDocs.Add(1); count <= 100 || count%10000 == 0 {
+		slog.Warn(fmt.Sprintf("Replacing ttl %v rejected by Cosmos DB with -1 in %s, id %v (%d replacements so far)", ttl, namespace, id, count))
+	}
 	return out, nil
 }
 
