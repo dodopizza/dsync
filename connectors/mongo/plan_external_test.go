@@ -50,19 +50,21 @@ func TestMongoServerPlanCoversMixedIDTypes(t *testing.T) {
 	namespace := col.Database().Name() + "." + col.Name()
 
 	for _, tc := range []struct {
-		name  string
-		query string
-		want  func(bson.RawValue) bool
+		name   string
+		query  string
+		target int64
+		want   func(bson.RawValue) bool
 	}{
-		{"no query", "", func(bson.RawValue) bool { return true }},
-		{"string query", `{"_id":{"$type":"string"}}`, func(v bson.RawValue) bool { return v.Type == bson.TypeString }},
-		{"query matching nothing", `{"_id":{"$type":"date"}}`, func(bson.RawValue) bool { return false }},
-		{"objectId and number query", `{"_id":{"$type":["objectId","number"]}}`, func(v bson.RawValue) bool {
+		{"no query", "", 50, func(bson.RawValue) bool { return true }},
+		{"string query", `{"_id":{"$type":"string"}}`, 50, func(v bson.RawValue) bool { return v.Type == bson.TypeString }},
+		{"small collection without sampling", "", 10000, func(bson.RawValue) bool { return true }},
+		{"query matching nothing", `{"_id":{"$type":"date"}}`, 50, func(bson.RawValue) bool { return false }},
+		{"objectId and number query", `{"_id":{"$type":["objectId","number"]}}`, 50, func(v bson.RawValue) bool {
 			return v.Type == bson.TypeObjectID || bsonTypeSortOrder(v.Type) == bsonTypeOrderNumber
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := NewConnWithClient(client, ConnectorSettings{TargetDocCountPerPartition: 50, SampleFactor: 1, Query: tc.query})
+			c, err := NewConnWithClient(client, ConnectorSettings{TargetDocCountPerPartition: tc.target, SampleFactor: 1, Query: tc.query})
 			require.NoError(t, err)
 			plan, err := c.GeneratePlan(ctx, connect.NewRequest(&adiomv1.GeneratePlanRequest{Namespaces: []string{namespace}, InitialSync: true}))
 			require.NoError(t, err)
