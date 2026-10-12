@@ -205,7 +205,7 @@ func partialU(t *testing.T, id string, data bson.M, unset ...string) *adiomv1.Up
 
 func TestBuildBulkModels_Empty(t *testing.T) {
 	c := &conn{}
-	models, ordered, err := c.buildBulkModels("db.col", nil, nil)
+	models, ordered, err := c.buildBulkModels("db.col", nil)
 	require.NoError(t, err)
 	assert.Empty(t, models)
 	assert.False(t, ordered)
@@ -217,7 +217,7 @@ func TestBuildBulkModels_AllUniqueStaysUnordered(t *testing.T) {
 		insertU(t, "a", bson.M{"x": 1}),
 		insertU(t, "b", bson.M{"x": 2}),
 		deleteU(t, "c"),
-	}, nil)
+	})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	assert.Len(t, models, 3)
@@ -229,7 +229,7 @@ func TestBuildBulkModels_DedupKeepsLast(t *testing.T) {
 		insertU(t, "a", bson.M{"v": 1}),
 		insertU(t, "a", bson.M{"v": 2}),
 		insertU(t, "a", bson.M{"v": 3}),
-	}, nil)
+	})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	require.Len(t, models, 1)
@@ -246,7 +246,7 @@ func TestBuildBulkModels_DeleteAfterInsertsKeepsOnlyDelete(t *testing.T) {
 		insertU(t, "a", bson.M{"v": 1}),
 		insertU(t, "a", bson.M{"v": 2}),
 		deleteU(t, "a"),
-	}, nil)
+	})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	require.Len(t, models, 1)
@@ -259,7 +259,7 @@ func TestBuildBulkModels_PartialLastTriggersOrdered(t *testing.T) {
 	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"v": 1}),
 		partialU(t, "a", bson.M{"w": 2}),
-	}, nil)
+	})
 	require.NoError(t, err)
 	assert.True(t, ordered)
 	require.Len(t, models, 2)
@@ -277,7 +277,7 @@ func TestBuildBulkModels_PartialLastOrderedPreservesChronology(t *testing.T) {
 		partialU(t, "a", bson.M{"w": 2}),
 		insertU(t, "a", bson.M{"v": 3}),
 		partialU(t, "a", bson.M{"x": 4}),
-	}, nil)
+	})
 	require.NoError(t, err)
 	assert.True(t, ordered)
 	// Four ops, all for the same id; ordered must preserve chronological order.
@@ -293,7 +293,7 @@ func TestBuildBulkModels_PartialOnlyIdInDataSkipped(t *testing.T) {
 	c := &conn{}
 	// Partial with data that contains only _id (stripped to nil) and no unset -> no-op.
 	u := partialU(t, "a", bson.M{"_id": "a"})
-	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u}, nil)
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	assert.Empty(t, models)
@@ -302,7 +302,7 @@ func TestBuildBulkModels_PartialOnlyIdInDataSkipped(t *testing.T) {
 func TestBuildBulkModels_PartialUnsetOnly(t *testing.T) {
 	c := &conn{}
 	u := partialU(t, "a", nil, "foo", "bar")
-	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u}, nil)
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	require.Len(t, models, 1)
@@ -319,7 +319,7 @@ func TestBuildBulkModels_PartialUnsetOnly(t *testing.T) {
 func TestBuildBulkModels_PartialUnsetFiltersIdFields(t *testing.T) {
 	c := &conn{}
 	u := partialU(t, "a", bson.M{"x": 1}, "_id", "foo")
-	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u}, nil)
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	require.Len(t, models, 1)
@@ -336,7 +336,7 @@ func TestBuildBulkModels_PartialUnsetOnlyIdBecomesNoop(t *testing.T) {
 	c := &conn{}
 	// Unset only contains _id which gets filtered -> empty update -> skipped.
 	u := partialU(t, "a", nil, "_id")
-	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u}, nil)
+	models, ordered, err := c.buildBulkModels("db.col", []*adiomv1.Update{u})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	assert.Empty(t, models)
@@ -358,7 +358,7 @@ func TestBuildBulkModels_FullDocumentKeyDedupesByComposite(t *testing.T) {
 		mk("a", "s1", 1),
 		mk("a", "s2", 2), // same _id, different shard -> distinct doc
 		mk("a", "s1", 3), // same composite as first -> dedup replaces it
-	}, nil)
+	})
 	require.NoError(t, err)
 	assert.False(t, ordered)
 	// Two unique docs after dedup.
@@ -367,7 +367,7 @@ func TestBuildBulkModels_FullDocumentKeyDedupesByComposite(t *testing.T) {
 
 func TestBuildBulkModels_ErrorPropagates(t *testing.T) {
 	c := &conn{}
-	_, _, err := c.buildBulkModels("db.col", []*adiomv1.Update{{Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT}}, nil)
+	_, _, err := c.buildBulkModels("db.col", []*adiomv1.Update{{Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT}})
 	assert.ErrorContains(t, err, "unexpected empty id")
 }
 
@@ -499,7 +499,7 @@ func TestBuildBulkModels_ReplacesInvalidCosmosTTL(t *testing.T) {
 	models, _, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"ttl": int32(-411077)}),
 		partialU(t, "b", bson.M{"ttl": int32(0)}),
-	}, nil)
+	})
 	require.NoError(t, err)
 	require.Len(t, models, 2)
 	var replacement, set bson.M
@@ -538,14 +538,4 @@ func TestShardKeyFilter_MissingFieldFails(t *testing.T) {
 	raw := bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: "x"}}))
 	_, err := shardKeyFilter(raw, bson.D{{Key: "_id", Value: "x"}}, []string{"PartitionId"})
 	require.Error(t, err)
-}
-
-func TestBuildBulkModels_ReplacementFilterAddsShardKey(t *testing.T) {
-	c := &conn{}
-	models, _, err := c.buildBulkModels("db.col", []*adiomv1.Update{insertU(t, "a", bson.M{"PartitionId": int32(3)})}, []string{"PartitionId"})
-	require.NoError(t, err)
-	require.Len(t, models, 1)
-	var filter bson.M
-	require.NoError(t, bson.Unmarshal(mustMarshal(t, models[0].(*mongo.ReplaceOneModel).Filter), &filter))
-	assert.Equal(t, bson.M{"_id": "a", "PartitionId": int32(3)}, filter)
 }
