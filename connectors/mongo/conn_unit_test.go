@@ -378,15 +378,22 @@ func TestSamplePipeline_NoQuery(t *testing.T) {
 	}, samplePipeline(1, nil))
 }
 
-func TestIDTypeAliasesCoverEverySortOrderOfAnID(t *testing.T) {
+func TestIDTypeAliasesCoverOrdinaryIDTypes(t *testing.T) {
 	for _, typ := range []bson.Type{
-		bson.TypeDouble, bson.TypeString, bson.TypeEmbeddedDocument, bson.TypeBinary, bson.TypeUndefined,
-		bson.TypeObjectID, bson.TypeBoolean, bson.TypeDateTime, bson.TypeNull, bson.TypeRegex, bson.TypeDBPointer,
-		bson.TypeJavaScript, bson.TypeSymbol, bson.TypeCodeWithScope, bson.TypeInt32, bson.TypeTimestamp,
-		bson.TypeInt64, bson.TypeDecimal128, bson.TypeMinKey, bson.TypeMaxKey,
+		bson.TypeNull, bson.TypeUndefined, bson.TypeDouble, bson.TypeInt32, bson.TypeInt64, bson.TypeDecimal128,
+		bson.TypeString, bson.TypeSymbol, bson.TypeEmbeddedDocument, bson.TypeBinary, bson.TypeObjectID,
+		bson.TypeBoolean, bson.TypeDateTime, bson.TypeTimestamp,
 	} {
 		assert.Contains(t, idTypeAliases, bsonTypeSortOrder(typ), typ.String())
 	}
+	for _, typ := range []bson.Type{bson.TypeMinKey, bson.TypeMaxKey, bson.TypeRegex, bson.TypeDBPointer, bson.TypeJavaScript, bson.TypeCodeWithScope} {
+		assert.NotContains(t, idTypeAliases, bsonTypeSortOrder(typ), typ.String())
+	}
+}
+
+func TestNewConnWithClientRejectsInvalidQuery(t *testing.T) {
+	_, err := NewConnWithClient(nil, ConnectorSettings{Query: "{bad"})
+	assert.Error(t, err)
 }
 
 func TestAndFilter(t *testing.T) {

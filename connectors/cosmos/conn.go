@@ -537,7 +537,10 @@ func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler 
 		panic(err)
 	}
 
-	mongoConn := mongoconn.NewConnWithClient(client, settings.ConnectorSettings)
+	mongoConn, err := mongoconn.NewConnWithClient(client, settings.ConnectorSettings)
+	if err != nil {
+		panic(err)
+	}
 	return &conn{
 		ConnectorServiceHandler: mongoConn,
 		connectorSettings:       settings,

@@ -202,7 +202,6 @@ func findSmallestID(ctx context.Context, col *mongo.Collection, query bson.D) (b
 }
 
 var idTypeAliases = map[int]bson.A{
-	1:  {"minKey"},
 	2:  {"null", "undefined"},
 	3:  {"number"},
 	4:  {"string", "symbol"},
@@ -212,10 +211,6 @@ var idTypeAliases = map[int]bson.A{
 	9:  {"bool"},
 	10: {"date"},
 	11: {"timestamp"},
-	12: {"regex"},
-	13: {"javascript"},
-	14: {"javascriptWithScope", "dbPointer"},
-	15: {"maxKey"},
 }
 
 func andFilter(a, b bson.D) bson.D {
@@ -237,12 +232,18 @@ func (c *conn) planCollection(ctx context.Context, col *mongo.Collection, namesp
 	if err != nil {
 		return nil, fmt.Errorf("err finding largest id: %w", err)
 	}
+	if lowest.IsZero() {
+		return []*adiomv1.Partition{{Namespace: namespace, Cursor: EncodeCursor(bson.RawValue{}, high)}}, nil
+	}
+	mixed := bsonTypeSortOrder(lowest.Type) != bsonTypeSortOrder(high.Type)
+	if mixed && (idTypeAliases[bsonTypeSortOrder(lowest.Type)] == nil || idTypeAliases[bsonTypeSortOrder(high.Type)] == nil) {
+		return nil, fmt.Errorf("mixed _id types %v and %v not supported", lowest.Type, high.Type)
+	}
 
 	count, err := col.EstimatedDocumentCount(ctx)
 	if err != nil {
 		return nil, err
 	}
-	mixed := bsonTypeSortOrder(lowest.Type) != bsonTypeSortOrder(high.Type)
 	var ids []bson.RawValue
 	if count < c.settings.TargetDocCountPerPartition*2 {
 		if !mixed {
@@ -1208,15 +1209,15 @@ func NewConn(connSettings ConnectorSettings) (adiomv1connect.ConnectorServiceHan
 		slog.Error(fmt.Sprintf("unable to connect to mongo client: %v", err))
 		return nil, err
 	}
-	return NewConnWithClient(client, connSettings), nil
+	return NewConnWithClient(client, connSettings)
 }
 
-func NewConnWithClient(client *mongo.Client, settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewConnWithClient(client *mongo.Client, settings ConnectorSettings) (adiomv1connect.ConnectorServiceHandler, error) {
 	query, err := stringToQuery(settings.Query)
 	if err != nil {
-		slog.Error(fmt.Sprintf("Failed to parse query (%v): %v", settings.Query, err))
+		return nil, fmt.Errorf("failed to parse query (%v): %w", settings.Query, err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &conn{
 		client:          client,
 		settings:        settings,
@@ -1226,7 +1227,7 @@ func NewConnWithClient(client *mongo.Client, settings ConnectorSettings) adiomv1
 		buffers:         map[int64]buffer{},
 		cleanupInterval: 5 * time.Minute,
 		query:           query,
-	}
+	}, nil
 }
 
 func (c *conn) changeStreamOpts(cursor []byte) *moptions.ChangeStreamOptionsBuilder {

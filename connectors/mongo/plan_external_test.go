@@ -56,15 +56,16 @@ func TestMongoServerPlanCoversMixedIDTypes(t *testing.T) {
 	}{
 		{"no query", "", func(bson.RawValue) bool { return true }},
 		{"string query", `{"_id":{"$type":"string"}}`, func(v bson.RawValue) bool { return v.Type == bson.TypeString }},
+		{"query matching nothing", `{"_id":{"$type":"date"}}`, func(bson.RawValue) bool { return false }},
 		{"objectId and number query", `{"_id":{"$type":["objectId","number"]}}`, func(v bson.RawValue) bool {
 			return v.Type == bson.TypeObjectID || bsonTypeSortOrder(v.Type) == bsonTypeOrderNumber
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewConnWithClient(client, ConnectorSettings{TargetDocCountPerPartition: 50, SampleFactor: 1, Query: tc.query})
+			c, err := NewConnWithClient(client, ConnectorSettings{TargetDocCountPerPartition: 50, SampleFactor: 1, Query: tc.query})
+			require.NoError(t, err)
 			plan, err := c.GeneratePlan(ctx, connect.NewRequest(&adiomv1.GeneratePlanRequest{Namespaces: []string{namespace}, InitialSync: true}))
 			require.NoError(t, err)
-			require.Greater(t, len(plan.Msg.GetPartitions()), 4)
 
 			want := map[string]int{}
 			for _, d := range docs {
@@ -92,4 +93,27 @@ func TestMongoServerPlanCoversMixedIDTypes(t *testing.T) {
 			require.Equal(t, want, got)
 		})
 	}
+}
+
+func TestMongoServerPlanRejectsMixedIDsWithMaxKey(t *testing.T) {
+	uri := os.Getenv("MONGO_PLAN_TEST_URI")
+	if uri == "" {
+		t.Skip("set MONGO_PLAN_TEST_URI to run")
+	}
+
+	client, err := mongo.Connect(options.Client().ApplyURI(uri).SetServerSelectionTimeout(10 * time.Second))
+	require.NoError(t, err)
+	defer client.Disconnect(context.Background())
+
+	col := client.Database("dsync_plan_test").Collection("maxkey_ids_" + bson.NewObjectID().Hex())
+	defer func() {
+		require.NoError(t, col.Drop(context.Background()))
+	}()
+	_, err = col.InsertMany(t.Context(), []any{bson.D{{"_id", "a"}}, bson.D{{"_id", bson.MaxKey{}}}})
+	require.NoError(t, err)
+
+	c, err := NewConnWithClient(client, ConnectorSettings{TargetDocCountPerPartition: 50, SampleFactor: 1})
+	require.NoError(t, err)
+	_, err = c.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{Namespaces: []string{"dsync_plan_test." + col.Name()}, InitialSync: true}))
+	require.ErrorContains(t, err, "not supported")
 }
