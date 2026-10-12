@@ -21,12 +21,23 @@ func TestRetryPolicyBoundsAttemptsByRetries(t *testing.T) {
 	require.Equal(t, 3, attempts)
 }
 
-func TestRetryPolicyHasNoElapsedTimeLimit(t *testing.T) {
-	b := RetryPolicy{Retries: 1, MaxInterval: time.Millisecond}.Backoff(t.Context())
-	b.Reset()
-	time.Sleep(20 * time.Millisecond)
+type fakeClock struct{ now time.Time }
 
-	require.NotEqual(t, backoff.Stop, b.NextBackOff())
+func (c *fakeClock) Now() time.Time { return c.now }
+
+func TestRetryPolicyCapsEveryWaitWithoutElapsedTimeLimit(t *testing.T) {
+	maxInterval := 100 * time.Millisecond
+	b := RetryPolicy{MaxInterval: maxInterval}.exponential()
+	clock := &fakeClock{now: time.Now()}
+	b.Clock = clock
+	b.Reset()
+
+	for range 50 {
+		clock.now = clock.now.Add(time.Hour)
+		next := b.NextBackOff()
+		require.NotEqual(t, backoff.Stop, next)
+		require.LessOrEqual(t, next, maxInterval)
+	}
 }
 
 func TestRetryPolicyStopsWaitingOnCancel(t *testing.T) {

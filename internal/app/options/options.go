@@ -6,6 +6,7 @@
 package options
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/adiom-data/dsync/internal/util"
@@ -90,6 +91,11 @@ func NewFromCLIContext(c *cli.Context) (Options, error) {
 	o.ReadRetry = util.RetryPolicy{Retries: c.Uint64("read-retries"), MaxInterval: c.Duration("read-retry-max-interval")}
 	o.WriteRetry = util.RetryPolicy{Retries: c.Uint64("write-retries"), MaxInterval: c.Duration("write-retry-max-interval")}
 	o.MetaRetry = util.RetryPolicy{Retries: c.Uint64("meta-retries"), MaxInterval: c.Duration("meta-retry-max-interval")}
+	for name, policy := range map[string]util.RetryPolicy{"read": o.ReadRetry, "write": o.WriteRetry, "meta": o.MetaRetry} {
+		if policy.MaxInterval <= 0 {
+			return o, fmt.Errorf("--%s-retry-max-interval must be positive", name)
+		}
+	}
 
 	return o, nil
 }

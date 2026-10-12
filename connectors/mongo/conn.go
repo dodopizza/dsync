@@ -939,7 +939,11 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 					id := doc.(bson.Raw).Lookup("_id") //we know it's there because there was a conflict on _id //XXX: should we check that it's the right type?
 					bulkOverwrite = append(bulkOverwrite, mongo.NewReplaceOneModel().SetFilter(bson.M{"_id": id}).SetReplacement(doc).SetUpsert(true))
 				} else {
-					slog.Error(fmt.Sprintf("Failure to insert document into collection: %v", we.WriteError))
+					if slices.Contains(transientServerCodes, we.Code) {
+						slog.Warn(fmt.Sprintf("Transient failure to insert document into collection: %v", we.WriteError))
+					} else {
+						slog.Error(fmt.Sprintf("Failure to insert document into collection: %v", we.WriteError))
+					}
 					return bwErr
 				}
 			}
@@ -1261,14 +1265,32 @@ func (c *conn) changeStreamOpts(cursor []byte) *moptions.ChangeStreamOptionsBuil
 
 const cosmosTooManyRequestsCode = 16500
 
+var transientServerCodes = []int{91, 189, 10107, 11600, 11602, 13435, 13436, cosmosTooManyRequestsCode}
+
 func IsTransientError(err error) bool {
 	if _, isNetErr := errors.AsType[net.Error](err); isNetErr {
 		return true
 	}
-	if serverErr, ok := errors.AsType[mongo.ServerError](err); ok && serverErr.HasErrorCode(cosmosTooManyRequestsCode) {
+	if bulkErr, ok := errors.AsType[mongo.BulkWriteException](err); ok {
+		return isTransientBulkError(bulkErr)
+	}
+	if serverErr, ok := errors.AsType[mongo.ServerError](err); ok && (serverErr.HasErrorLabel("RetryableWriteError") || slices.ContainsFunc(transientServerCodes, serverErr.HasErrorCode)) {
 		return true
 	}
 	return mongo.IsNetworkError(err) || mongo.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func isTransientBulkError(err mongo.BulkWriteException) bool {
+	var codes []int
+	for _, we := range err.WriteErrors {
+		if !mongo.IsDuplicateKeyError(we.WriteError) {
+			codes = append(codes, we.Code)
+		}
+	}
+	if err.WriteConcernError != nil {
+		codes = append(codes, err.WriteConcernError.Code)
+	}
+	return len(codes) > 0 && !slices.ContainsFunc(codes, func(code int) bool { return !slices.Contains(transientServerCodes, code) })
 }
 
 func maybeUnavailableError(err error) error {

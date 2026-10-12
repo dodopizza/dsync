@@ -428,18 +428,25 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 		err  error
 		code connect.Code
 	}{
-		"labeled network error":    {mongo.CommandError{Labels: []string{"NetworkError"}, Wrapped: io.EOF}, connect.CodeUnavailable},
-		"handshake dns timeout":    {topology.ConnectionError{Wrapped: dnsTimeout}, connect.CodeUnavailable},
-		"unlabeled handshake eof":  {topology.ConnectionError{Wrapped: io.ErrUnexpectedEOF}, connect.CodeUnavailable},
-		"unlabeled eof":            {topology.ConnectionError{Wrapped: io.EOF}, connect.CodeUnavailable},
-		"server selection timeout": {topology.ServerSelectionError{Wrapped: context.DeadlineExceeded}, connect.CodeUnavailable},
-		"driver deadline":          {fmt.Errorf("find: %w", context.DeadlineExceeded), connect.CodeUnavailable},
-		"server maxTimeMS":         {mongo.CommandError{Code: 50, Name: "MaxTimeMSExpired"}, connect.CodeUnavailable},
-		"cancelled flow":           {topology.ConnectionError{Wrapped: context.Canceled}, connect.CodeCanceled},
-		"cosmos throttled command": {mongo.CommandError{Code: 16500, Name: "TooManyRequests"}, connect.CodeUnavailable},
-		"cosmos throttled bulk":    {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 16500}}}}, connect.CodeUnavailable},
-		"auth failure":             {mongo.CommandError{Code: 13, Name: "Unauthorized"}, connect.CodeInternal},
-		"unknown":                  {errors.New("boom"), connect.CodeInternal},
+		"labeled network error":           {mongo.CommandError{Labels: []string{"NetworkError"}, Wrapped: io.EOF}, connect.CodeUnavailable},
+		"handshake dns timeout":           {topology.ConnectionError{Wrapped: dnsTimeout}, connect.CodeUnavailable},
+		"unlabeled handshake eof":         {topology.ConnectionError{Wrapped: io.ErrUnexpectedEOF}, connect.CodeUnavailable},
+		"unlabeled eof":                   {topology.ConnectionError{Wrapped: io.EOF}, connect.CodeUnavailable},
+		"server selection timeout":        {topology.ServerSelectionError{Wrapped: context.DeadlineExceeded}, connect.CodeUnavailable},
+		"driver deadline":                 {fmt.Errorf("find: %w", context.DeadlineExceeded), connect.CodeUnavailable},
+		"server maxTimeMS":                {mongo.CommandError{Code: 50, Name: "MaxTimeMSExpired"}, connect.CodeUnavailable},
+		"cancelled flow":                  {topology.ConnectionError{Wrapped: context.Canceled}, connect.CodeCanceled},
+		"cosmos throttled command":        {mongo.CommandError{Code: 16500, Name: "TooManyRequests"}, connect.CodeUnavailable},
+		"cosmos throttled bulk":           {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 16500}}}}, connect.CodeUnavailable},
+		"throttled bulk with duplicates":  {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 11000}}, {WriteError: mongo.WriteError{Code: 16500}}}}, connect.CodeUnavailable},
+		"throttled bulk with invalid doc": {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 16500}}, {WriteError: mongo.WriteError{Code: 2}}}}, connect.CodeInternal},
+		"bulk with only duplicates":       {mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{WriteError: mongo.WriteError{Code: 11000}}}}, connect.CodeInternal},
+		"bulk write concern shutdown":     {mongo.BulkWriteException{WriteConcernError: &mongo.WriteConcernError{Code: 91}}, connect.CodeUnavailable},
+		"bulk write concern failed":       {mongo.BulkWriteException{WriteConcernError: &mongo.WriteConcernError{Code: 64}}, connect.CodeInternal},
+		"primary stepped down":            {mongo.CommandError{Code: 189, Name: "PrimarySteppedDown"}, connect.CodeUnavailable},
+		"retryable write label":           {mongo.CommandError{Code: 1, Labels: []string{"RetryableWriteError"}}, connect.CodeUnavailable},
+		"auth failure":                    {mongo.CommandError{Code: 13, Name: "Unauthorized"}, connect.CodeInternal},
+		"unknown":                         {errors.New("boom"), connect.CodeInternal},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

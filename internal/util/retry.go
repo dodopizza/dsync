@@ -13,6 +13,24 @@ type RetryPolicy struct {
 }
 
 func (p RetryPolicy) Backoff(ctx context.Context) backoff.BackOffContext {
-	exp := backoff.NewExponentialBackOff(backoff.WithMaxInterval(p.MaxInterval), backoff.WithMaxElapsedTime(0))
-	return backoff.WithContext(backoff.WithMaxRetries(exp, p.Retries), ctx)
+	return backoff.WithContext(backoff.WithMaxRetries(p.exponential(), p.Retries), ctx)
+}
+
+func (p RetryPolicy) exponential() cappedBackOff {
+	return cappedBackOff{
+		ExponentialBackOff: backoff.NewExponentialBackOff(
+			backoff.WithInitialInterval(min(backoff.DefaultInitialInterval, p.MaxInterval)),
+			backoff.WithMaxInterval(p.MaxInterval),
+			backoff.WithMaxElapsedTime(0)),
+		max: p.MaxInterval,
+	}
+}
+
+type cappedBackOff struct {
+	*backoff.ExponentialBackOff
+	max time.Duration
+}
+
+func (b cappedBackOff) NextBackOff() time.Duration {
+	return min(b.ExponentialBackOff.NextBackOff(), b.max)
 }

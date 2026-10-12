@@ -173,32 +173,32 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 		altsrc.NewUint64Flag(&cli.Uint64Flag{
 			Name:  "read-retries",
 			Usage: "number of retries after a transient source read error before failing",
-			Value: 3,
+			Value: 8,
 		}),
 		altsrc.NewDurationFlag(&cli.DurationFlag{
 			Name:  "read-retry-max-interval",
 			Usage: "upper bound of the exponential wait between source read retries",
-			Value: time.Minute,
+			Value: 10 * time.Second,
 		}),
 		altsrc.NewUint64Flag(&cli.Uint64Flag{
 			Name:  "write-retries",
 			Usage: "number of retries after a transient destination write error before failing",
-			Value: 3,
+			Value: 8,
 		}),
 		altsrc.NewDurationFlag(&cli.DurationFlag{
 			Name:  "write-retry-max-interval",
 			Usage: "upper bound of the exponential wait between destination write retries",
-			Value: time.Minute,
+			Value: 30 * time.Second,
 		}),
 		altsrc.NewUint64Flag(&cli.Uint64Flag{
 			Name:  "meta-retries",
 			Usage: "number of retries after a transient metadata store error before failing",
-			Value: 3,
+			Value: 10,
 		}),
 		altsrc.NewDurationFlag(&cli.DurationFlag{
 			Name:  "meta-retry-max-interval",
 			Usage: "upper bound of the exponential wait between metadata store retries",
-			Value: time.Minute,
+			Value: 30 * time.Second,
 		}),
 		altsrc.NewBoolFlag(&cli.BoolFlag{
 			Name:     "namespace-batcher",
