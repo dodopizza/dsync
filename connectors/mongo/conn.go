@@ -1265,32 +1265,44 @@ func (c *conn) changeStreamOpts(cursor []byte) *moptions.ChangeStreamOptionsBuil
 
 const cosmosTooManyRequestsCode = 16500
 
-var transientServerCodes = []int{91, 189, 10107, 11600, 11602, 13435, 13436, cosmosTooManyRequestsCode}
+var transientServerCodes = []int{6, 7, 89, 91, 134, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436, cosmosTooManyRequestsCode}
+
+var transientErrorLabels = []string{"RetryableWriteError", "NetworkError"}
 
 func IsTransientError(err error) bool {
 	if _, isNetErr := errors.AsType[net.Error](err); isNetErr {
 		return true
 	}
-	if bulkErr, ok := errors.AsType[mongo.BulkWriteException](err); ok {
-		return isTransientBulkError(bulkErr)
+	if writeErr, ok := errors.AsType[mongo.WriteException](err); ok {
+		return isTransientWriteError(writeErr.WriteErrors, writeErr.WriteConcernError, writeErr.Labels)
 	}
-	if serverErr, ok := errors.AsType[mongo.ServerError](err); ok && (serverErr.HasErrorLabel("RetryableWriteError") || slices.ContainsFunc(transientServerCodes, serverErr.HasErrorCode)) {
+	if bulkErr, ok := errors.AsType[mongo.BulkWriteException](err); ok {
+		writeErrors := make([]mongo.WriteError, len(bulkErr.WriteErrors))
+		for i, we := range bulkErr.WriteErrors {
+			writeErrors[i] = we.WriteError
+		}
+		return isTransientWriteError(writeErrors, bulkErr.WriteConcernError, bulkErr.Labels)
+	}
+	if serverErr, ok := errors.AsType[mongo.ServerError](err); ok && (slices.ContainsFunc(transientErrorLabels, serverErr.HasErrorLabel) || slices.ContainsFunc(transientServerCodes, serverErr.HasErrorCode)) {
 		return true
 	}
 	return mongo.IsNetworkError(err) || mongo.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-func isTransientBulkError(err mongo.BulkWriteException) bool {
+func isTransientWriteError(writeErrors []mongo.WriteError, concernErr *mongo.WriteConcernError, labels []string) bool {
 	var codes []int
-	for _, we := range err.WriteErrors {
-		if !mongo.IsDuplicateKeyError(we.WriteError) {
+	for _, we := range writeErrors {
+		if !mongo.IsDuplicateKeyError(we) {
 			codes = append(codes, we.Code)
 		}
 	}
-	if err.WriteConcernError != nil {
-		codes = append(codes, err.WriteConcernError.Code)
+	if concernErr != nil {
+		codes = append(codes, concernErr.Code)
 	}
-	return len(codes) > 0 && !slices.ContainsFunc(codes, func(code int) bool { return !slices.Contains(transientServerCodes, code) })
+	if slices.ContainsFunc(codes, func(code int) bool { return !slices.Contains(transientServerCodes, code) }) {
+		return false
+	}
+	return len(codes) > 0 || slices.ContainsFunc(labels, func(label string) bool { return slices.Contains(transientErrorLabels, label) })
 }
 
 func maybeUnavailableError(err error) error {
