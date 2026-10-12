@@ -97,7 +97,7 @@ func TestMongoServerPlanCoversMixedIDTypes(t *testing.T) {
 	}
 }
 
-func TestMongoServerPlanRejectsMixedIDsWithMaxKey(t *testing.T) {
+func TestMongoServerPlanRejectsUnsupportedMixedIDs(t *testing.T) {
 	uri := os.Getenv("MONGO_PLAN_TEST_URI")
 	if uri == "" {
 		t.Skip("set MONGO_PLAN_TEST_URI to run")
@@ -107,15 +107,24 @@ func TestMongoServerPlanRejectsMixedIDsWithMaxKey(t *testing.T) {
 	require.NoError(t, err)
 	defer client.Disconnect(context.Background())
 
-	col := client.Database("dsync_plan_test").Collection("maxkey_ids_" + bson.NewObjectID().Hex())
-	defer func() {
-		require.NoError(t, col.Drop(context.Background()))
-	}()
-	_, err = col.InsertMany(t.Context(), []any{bson.D{{"_id", "a"}}, bson.D{{"_id", bson.MaxKey{}}}})
-	require.NoError(t, err)
+	for name, ids := range map[string][]any{
+		"string and maxKey":           {"a", bson.MaxKey{}},
+		"dbPointer and codeWithScope": {bson.DBPointer{DB: "x", Pointer: bson.NewObjectID()}, bson.CodeWithScope{Code: "f", Scope: bson.D{}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			col := client.Database("dsync_plan_test").Collection("unsupported_ids_" + bson.NewObjectID().Hex())
+			defer func() {
+				require.NoError(t, col.Drop(context.Background()))
+			}()
+			for _, id := range ids {
+				_, err := col.InsertOne(t.Context(), bson.D{{"_id", id}})
+				require.NoError(t, err)
+			}
 
-	c, err := NewConnWithClient(client, ConnectorSettings{TargetDocCountPerPartition: 50, SampleFactor: 1})
-	require.NoError(t, err)
-	_, err = c.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{Namespaces: []string{"dsync_plan_test." + col.Name()}, InitialSync: true}))
-	require.ErrorContains(t, err, "not supported")
+			c, err := NewConnWithClient(client, ConnectorSettings{TargetDocCountPerPartition: 50, SampleFactor: 1})
+			require.NoError(t, err)
+			_, err = c.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{Namespaces: []string{"dsync_plan_test." + col.Name()}, InitialSync: true}))
+			require.ErrorContains(t, err, "not supported")
+		})
+	}
 }

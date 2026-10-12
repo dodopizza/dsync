@@ -236,7 +236,7 @@ func (c *conn) planCollection(ctx context.Context, col *mongo.Collection, namesp
 		return []*adiomv1.Partition{{Namespace: namespace, Cursor: EncodeCursor(bson.RawValue{}, high)}}, nil
 	}
 	mixed := bsonTypeSortOrder(lowest.Type) != bsonTypeSortOrder(high.Type)
-	if mixed && (idTypeAliases[bsonTypeSortOrder(lowest.Type)] == nil || idTypeAliases[bsonTypeSortOrder(high.Type)] == nil) {
+	if lowest.Type != high.Type && (idTypeAliases[bsonTypeSortOrder(lowest.Type)] == nil || idTypeAliases[bsonTypeSortOrder(high.Type)] == nil) {
 		return nil, fmt.Errorf("mixed _id types %v and %v not supported", lowest.Type, high.Type)
 	}
 
