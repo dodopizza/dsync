@@ -23,10 +23,12 @@ import (
 
 type Simple struct {
 	// Implement the necessary fields here
-	ctx        context.Context
-	flowCancel context.CancelFunc
-	t          iface.Transport
-	s          iface.Statestore
+	ctx         context.Context
+	flowCancel  context.CancelFunc
+	flowErr     error
+	flowErrOnce sync.Once
+	t           iface.Transport
+	s           iface.Statestore
 
 	flowMutex sync.Mutex
 
@@ -345,7 +347,7 @@ func (c *Simple) WaitForFlowDone(flowId iface.FlowID) error {
 	// Wait for the flow to be done
 	<-flowDet.flowDone //TODO (AK, 6/2024): should we just return the channel?
 
-	return nil
+	return c.flowErr
 }
 
 func (c *Simple) FlowStop(fid iface.FlowID) {
@@ -382,6 +384,7 @@ func (c *Simple) FlowDestroy(fid iface.FlowID) {
 }
 
 func (c *Simple) NotifyError(err error) {
+	c.flowErrOnce.Do(func() { c.flowErr = err })
 	c.flowCancel()
 }
 
