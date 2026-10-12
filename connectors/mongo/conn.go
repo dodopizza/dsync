@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"regexp"
@@ -45,7 +46,7 @@ type ConnectorSettings struct {
 	SkipBatchOverwrite         bool
 	FullDocumentKey            bool
 	PageBufferTTL              time.Duration
-	ReplaceInvalidCosmosTTL    bool
+	CosmosSink                 bool
 
 	Query string // query filter, as a v2 Extended JSON string, e.g., '{\"x\":{\"$gt\":1}}'"
 }
@@ -83,6 +84,7 @@ type conn struct {
 
 	nextCursorID    atomic.Int64
 	replacedTTLDocs atomic.Int64
+	shardKeyFields  sync.Map
 	ctx             context.Context
 	cancel          context.CancelFunc
 	buffersMutex    sync.RWMutex
@@ -924,7 +926,7 @@ func streamSendErr(err error) error {
 }
 
 // inserts data and overwrites on conflict
-func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []interface{}, skipBatchOverwrite bool) error {
+func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []interface{}, skipBatchOverwrite bool, shardKeyFields func() ([]string, error)) error {
 	// eagerly attempt an unordered insert
 	_, bwErr := collection.InsertMany(ctx, documents, options.InsertMany().SetOrdered(false))
 
@@ -938,9 +940,19 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 		if errors.As(bwErr, &bwErrWriteErrors) {
 			for _, we := range bwErrWriteErrors.WriteErrors {
 				if mongo.IsDuplicateKeyError(we.WriteError) {
-					doc := documents[we.Index]
-					id := doc.(bson.Raw).Lookup("_id") //we know it's there because there was a conflict on _id //XXX: should we check that it's the right type?
-					bulkOverwrite = append(bulkOverwrite, mongo.NewReplaceOneModel().SetFilter(bson.M{"_id": id}).SetReplacement(doc).SetUpsert(true))
+					if skipBatchOverwrite {
+						continue
+					}
+					fields, err := shardKeyFields()
+					if err != nil {
+						return err
+					}
+					doc := documents[we.Index].(bson.Raw)
+					filter, err := shardKeyFilter(doc, bson.D{{Key: "_id", Value: doc.Lookup("_id")}}, fields)
+					if err != nil {
+						return err
+					}
+					bulkOverwrite = append(bulkOverwrite, mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(doc).SetUpsert(true))
 				} else {
 					if slices.Contains(transientServerCodes, we.Code) {
 						slog.Warn(fmt.Sprintf("Transient failure to insert document into collection: %v", we.WriteError))
@@ -961,12 +973,12 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 			if isBSONObjectTooLargeError(bwErr) {
 				slog.Debug(fmt.Sprintf("Bulk write failed due to BSON object too large: %v", bwErr))
 				mid := len(documents) / 2
-				err := insertBatchOverwrite(ctx, collection, documents[:mid], skipBatchOverwrite)
+				err := insertBatchOverwrite(ctx, collection, documents[:mid], skipBatchOverwrite, shardKeyFields)
 				if err != nil {
 					slog.Error(fmt.Sprintf("Bulk write failed (first half, up to %d): %v", mid, err))
 					return err
 				}
-				err = insertBatchOverwrite(ctx, collection, documents[mid:], skipBatchOverwrite)
+				err = insertBatchOverwrite(ctx, collection, documents[mid:], skipBatchOverwrite, shardKeyFields)
 				if err != nil {
 					slog.Error(fmt.Sprintf("Bulk write failed (second half, from %d): %v", mid, err))
 					return err
@@ -980,14 +992,56 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 
 		// maybe redo them all as a bulk replace
 		if len(bulkOverwrite) > 0 && !skipBatchOverwrite {
-			_, err := collection.BulkWrite(ctx, bulkOverwrite, options.BulkWrite().SetOrdered(false))
+			res, err := collection.BulkWrite(ctx, bulkOverwrite, options.BulkWrite().SetOrdered(false))
+			if res != nil && res.UpsertedCount > 0 {
+				slog.Error(fmt.Sprintf("Overwrite inserted %d documents instead of replacing duplicates in %v (shard key mismatch?): %v", res.UpsertedCount, collection.Name(), slices.Collect(maps.Values(res.UpsertedIDs))[:min(10, len(res.UpsertedIDs))]))
+			}
 			if err != nil {
 				slog.Error(fmt.Sprintf("Failed to overwrite documents in collection: %v", err))
+				if owErr, ok := errors.AsType[mongo.BulkWriteException](err); ok {
+					for _, we := range owErr.WriteErrors[:min(10, len(owErr.WriteErrors))] {
+						slog.Error(fmt.Sprintf("Overwrite failed for %v: code %d: %v", bulkOverwrite[we.Index].(*mongo.ReplaceOneModel).Filter, we.Code, we.Message))
+					}
+				}
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func shardKeyFilter(doc bson.Raw, idFilter bson.D, shardKeyFields []string) (bson.D, error) {
+	filter := slices.Clone(idFilter)
+	for _, field := range shardKeyFields {
+		if slices.ContainsFunc(idFilter, func(e bson.E) bool { return e.Key == field }) {
+			continue
+		}
+		v, err := doc.LookupErr(strings.Split(field, ".")...)
+		if err != nil {
+			return nil, fmt.Errorf("document %v has no shard key field %v: %w", idFilter, field, err)
+		}
+		filter = append(filter, bson.E{Key: field, Value: v})
+	}
+	return filter, nil
+}
+
+func (c *conn) cosmosShardKeyFields(ctx context.Context, col *mongo.Collection) ([]string, error) {
+	if !c.settings.CosmosSink {
+		return nil, nil
+	}
+	ns := col.Database().Name() + "." + col.Name()
+	if fields, ok := c.shardKeyFields.Load(ns); ok {
+		return fields.([]string), nil
+	}
+	var res struct {
+		ShardKeyDefinition bson.M `bson:"shardKeyDefinition"`
+	}
+	if err := col.Database().RunCommand(ctx, bson.D{{Key: "customAction", Value: "GetCollection"}, {Key: "collection", Value: col.Name()}}).Decode(&res); err != nil {
+		return nil, fmt.Errorf("get shard key of %v: %w", ns, err)
+	}
+	fields := slices.DeleteFunc(slices.Sorted(maps.Keys(res.ShardKeyDefinition)), func(f string) bool { return f == "_id" })
+	c.shardKeyFields.Store(ns, fields)
+	return fields, nil
 }
 
 // WriteData implements adiomv1connect.ConnectorServiceHandler.
@@ -996,6 +1050,7 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("namespace should be fully qualified"))
 	}
+	shardKeyFields := sync.OnceValues(func() ([]string, error) { return c.cosmosShardKeyFields(ctx, col) })
 	var batch []interface{}
 	for _, data := range r.Msg.GetData() {
 		doc, err := c.cosmosValidTTL(r.Msg.GetNamespace(), bson.Raw(data), nil)
@@ -1004,7 +1059,7 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 		}
 		batch = append(batch, doc)
 		if c.settings.WriterMaxBatchSize > 0 && len(batch) >= c.settings.WriterMaxBatchSize {
-			err := insertBatchOverwrite(ctx, col, batch, c.settings.SkipBatchOverwrite)
+			err := insertBatchOverwrite(ctx, col, batch, c.settings.SkipBatchOverwrite, shardKeyFields)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
 					slog.Error(fmt.Sprintf("Failed to insert batch: %v", err))
@@ -1015,7 +1070,7 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 		}
 	}
 	if len(batch) > 0 {
-		err := insertBatchOverwrite(ctx, col, batch, c.settings.SkipBatchOverwrite)
+		err := insertBatchOverwrite(ctx, col, batch, c.settings.SkipBatchOverwrite, shardKeyFields)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				slog.Error(fmt.Sprintf("Failed to insert batch: %v", err))
@@ -1083,7 +1138,7 @@ func stripIdFields(raw bson.Raw, idFilter bson.D) (bson.Raw, error) {
 }
 
 func (c *conn) cosmosValidTTL(namespace string, raw bson.Raw, idFilter bson.D) (bson.Raw, error) {
-	if !c.settings.ReplaceInvalidCosmosTTL || raw == nil {
+	if !c.settings.CosmosSink || raw == nil {
 		return raw, nil
 	}
 	ttl, err := raw.LookupErr("ttl")

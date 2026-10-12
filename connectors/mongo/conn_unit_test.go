@@ -464,7 +464,7 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 }
 
 func TestCosmosValidTTL_ReplacesValuesCosmosRejects(t *testing.T) {
-	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
+	c := &conn{settings: ConnectorSettings{CosmosSink: true}}
 	for _, ttl := range []interface{}{int32(0), int32(-2), int64(-1523511), float64(-2), float64(0)} {
 		raw := bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: "x"}, {Key: "ttl", Value: ttl}, {Key: "a", Value: 1}}))
 		out, err := c.cosmosValidTTL("db.col", raw, nil)
@@ -476,7 +476,7 @@ func TestCosmosValidTTL_ReplacesValuesCosmosRejects(t *testing.T) {
 }
 
 func TestCosmosValidTTL_KeepsValuesCosmosAccepts(t *testing.T) {
-	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
+	c := &conn{settings: ConnectorSettings{CosmosSink: true}}
 	for _, doc := range []bson.M{
 		{"ttl": int32(-1)}, {"ttl": int64(-1)}, {"ttl": float64(-1)}, {"ttl": int64(31622400)}, {"ttl": 5.5}, {"ttl": -0.5}, {"ttl": math.NaN()}, {"ttl": "x"}, {"a": 1}, {"n": bson.M{"ttl": -5}},
 	} {
@@ -495,7 +495,7 @@ func TestCosmosValidTTL_DisabledKeepsDocument(t *testing.T) {
 }
 
 func TestBuildBulkModels_ReplacesInvalidCosmosTTL(t *testing.T) {
-	c := &conn{settings: ConnectorSettings{ReplaceInvalidCosmosTTL: true}}
+	c := &conn{settings: ConnectorSettings{CosmosSink: true}}
 	models, _, err := c.buildBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"ttl": int32(-411077)}),
 		partialU(t, "b", bson.M{"ttl": int32(0)}),
@@ -513,4 +513,29 @@ func TestBuildBulkModels_ReplacesInvalidCosmosTTL(t *testing.T) {
 	}
 	assert.Equal(t, int32(-1), replacement["ttl"])
 	assert.Equal(t, int32(-1), set["ttl"])
+}
+
+func TestShardKeyFilter_AddsDestinationShardKey(t *testing.T) {
+	id := bson.NewObjectID()
+	raw := bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: id}, {Key: "PartitionId", Value: int64(7)}, {Key: "n", Value: bson.D{{Key: "k", Value: "v"}}}}))
+	filter, err := shardKeyFilter(raw, bson.D{{Key: "_id", Value: id}}, []string{"PartitionId", "n.k"})
+	require.NoError(t, err)
+	assert.Equal(t, bson.D{{Key: "_id", Value: id}, {Key: "PartitionId", Value: raw.Lookup("PartitionId")}, {Key: "n.k", Value: raw.Lookup("n", "k")}}, filter)
+}
+
+func TestShardKeyFilter_KeepsIdFilterFields(t *testing.T) {
+	raw := bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: "x"}, {Key: "ShardKey", Value: "new"}}))
+	idFilter := bson.D{{Key: "_id", Value: "x"}, {Key: "ShardKey", Value: "src"}}
+	filter, err := shardKeyFilter(raw, idFilter[:1:2], nil)
+	require.NoError(t, err)
+	assert.Equal(t, bson.D{{Key: "_id", Value: "x"}}, filter)
+	filter, err = shardKeyFilter(raw, idFilter, []string{"ShardKey"})
+	require.NoError(t, err)
+	assert.Equal(t, idFilter, filter)
+}
+
+func TestShardKeyFilter_MissingFieldFails(t *testing.T) {
+	raw := bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: "x"}}))
+	_, err := shardKeyFilter(raw, bson.D{{Key: "_id", Value: "x"}}, []string{"PartitionId"})
+	require.Error(t, err)
 }
