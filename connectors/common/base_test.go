@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/adiom-data/dsync/gen/adiom/v1/adiomv1connect"
+	"github.com/adiom-data/dsync/protocol/iface"
 	"github.com/adiom-data/dsync/protocol/iface/mocks"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -114,4 +115,87 @@ func TestResumeTokenCheckIgnoresHealthyAndTransientStreams(t *testing.T) {
 			require.NoError(t, c.checkResumeToken(c.flowCtx, []string{"db.col"}, []byte("token")))
 		})
 	}
+}
+
+type listDataHandler struct {
+	adiomv1connect.UnimplementedConnectorServiceHandler
+	list func(*adiomv1.ListDataRequest) (*adiomv1.ListDataResponse, error)
+}
+
+func (h listDataHandler) ListData(_ context.Context, r *connect.Request[adiomv1.ListDataRequest]) (*connect.Response[adiomv1.ListDataResponse], error) {
+	res, err := h.list(r.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(res), nil
+}
+
+func (listDataHandler) GetNamespaceMetadata(context.Context, *connect.Request[adiomv1.GetNamespaceMetadataRequest]) (*connect.Response[adiomv1.GetNamespaceMetadataResponse], error) {
+	return connect.NewResponse(&adiomv1.GetNamespaceMetadataResponse{}), nil
+}
+
+func runInitialSync(t *testing.T, coord *mocks.Coordinator, list func(*adiomv1.ListDataRequest) (*adiomv1.ListDataResponse, error)) *connector {
+	_, handler := adiomv1connect.NewConnectorServiceHandler(listDataHandler{list: list})
+	srv, err := memhttp.New(handler)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Close() })
+	client := adiomv1connect.NewConnectorServiceClient(srv.Client(), srv.URL())
+	dataChannel := make(chan iface.DataMessage, 16)
+	transport := mocks.NewTransport(t)
+	transport.On("GetDataChannelEndpoint", mock.Anything).Return(dataChannel, nil)
+	done := make(chan struct{})
+	coord.On("NotifyDone", mock.Anything, mock.Anything).Return(nil).Once().Run(func(mock.Arguments) { close(done) })
+	var status iface.ConnectorStatus
+	c := &connector{
+		ctx:                t.Context(),
+		coord:              coord,
+		t:                  transport,
+		impl:               client,
+		maybeOptimizedImpl: client,
+		progressTracker:    NewProgressTracker(&status, t.Context()),
+		settings:           ConnectorSettings{NumParallelCopiers: 1, ResumeTokenUpdateInterval: time.Hour},
+	}
+	task := iface.ReadPlanTask{Id: 1}
+	task.Def.Db, task.Def.Col = "db", "db.col"
+	options := iface.ConnectorOptions{Mode: iface.SyncModeInitialSync}
+	require.NoError(t, c.StartReadToChannel("flow", options, iface.ConnectorReadPlan{Tasks: []iface.ReadPlanTask{task}}, "data"))
+	for range dataChannel {
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("NotifyDone not called")
+	}
+	return c
+}
+
+func TestInitialSyncModeFailsFlowWhenTaskFails(t *testing.T) {
+	coord := mocks.NewCoordinator(t)
+	coord.On("NotifyError", mock.Anything).Once()
+
+	c := runInitialSync(t, coord, func(*adiomv1.ListDataRequest) (*adiomv1.ListDataResponse, error) {
+		return nil, connect.NewError(connect.CodeInternal, errors.New("unauthorized"))
+	})
+
+	require.Error(t, c.flowCtx.Err())
+}
+
+func TestInitialSyncRetriesTaskFromItsStartAfterUnavailable(t *testing.T) {
+	coord := mocks.NewCoordinator(t)
+	coord.On("NotifyTaskDone", mock.Anything, mock.Anything, iface.ReadPlanTaskID(1), mock.Anything).Return(nil).Once()
+	var cursors [][]byte
+
+	c := runInitialSync(t, coord, func(r *adiomv1.ListDataRequest) (*adiomv1.ListDataResponse, error) {
+		cursors = append(cursors, r.GetCursor())
+		switch len(cursors) {
+		case 1:
+			return &adiomv1.ListDataResponse{Data: [][]byte{{1}}, NextCursor: []byte("page2")}, nil
+		case 2:
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("connection reset"))
+		}
+		return &adiomv1.ListDataResponse{Data: [][]byte{{1}}}, nil
+	})
+
+	require.Equal(t, [][]byte{nil, []byte("page2"), nil}, cursors)
+	require.NoError(t, c.flowCtx.Err())
 }

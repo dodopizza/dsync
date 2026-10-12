@@ -635,7 +635,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 					ns := iface.Namespace{Db: task.Def.Db, Col: task.Def.Col}
 					c.progressTracker.TaskStartedProgressUpdate(ns, task.Id)
 
-					backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+					backoffConfig := backoff.WithContext(backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3), c.flowCtx)
 					err := backoff.Retry(func() error {
 						if docs > 0 {
 							readerProgress.initialSyncDocs.Add(^uint64(docs - 1))
@@ -658,7 +658,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 							}))
 							if err != nil {
 								if isRetryable(err) {
-									slog.Debug("Retryable error encountered during ListData- retrying", "task", task.Id)
+									slog.Warn("Retryable error encountered during ListData - retrying task from its start", "task", task.Id, "error", err)
 									return err
 								} else {
 									if !errors.Is(err, context.Canceled) {
@@ -787,11 +787,11 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 		<-initialSyncDone
 		<-resumeTokenWatchDone
 		defer close(changeStreamDone)
-		if options.Mode == iface.SyncModeInitialSync {
-			return
-		}
 		if initialSyncFailed.Load() {
 			c.failFlow("initial sync", errors.New("some initial sync tasks failed"))
+			return
+		}
+		if options.Mode == iface.SyncModeInitialSync {
 			return
 		}
 		c.progressTracker.UpdateSyncState(iface.ChangeStreamSyncState)
