@@ -430,6 +430,8 @@ func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
 	}{
 		"labeled network error":    {mongo.CommandError{Labels: []string{"NetworkError"}, Wrapped: io.EOF}, connect.CodeUnavailable},
 		"handshake dns timeout":    {topology.ConnectionError{Wrapped: dnsTimeout}, connect.CodeUnavailable},
+		"unlabeled handshake eof":  {topology.ConnectionError{Wrapped: io.ErrUnexpectedEOF}, connect.CodeUnavailable},
+		"unlabeled eof":            {topology.ConnectionError{Wrapped: io.EOF}, connect.CodeUnavailable},
 		"server selection timeout": {topology.ServerSelectionError{Wrapped: context.DeadlineExceeded}, connect.CodeUnavailable},
 		"driver deadline":          {fmt.Errorf("find: %w", context.DeadlineExceeded), connect.CodeUnavailable},
 		"server maxTimeMS":         {mongo.CommandError{Code: 50, Name: "MaxTimeMSExpired"}, connect.CodeUnavailable},

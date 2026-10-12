@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"regexp"
@@ -1258,10 +1259,8 @@ func maybeUnavailableError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return connect.NewError(connect.CodeCanceled, err)
 	}
-	if mongo.IsNetworkError(err) || mongo.IsTimeout(err) {
-		return connect.NewError(connect.CodeUnavailable, err)
-	}
-	if _, ok := errors.AsType[net.Error](err); ok {
+	_, isNetErr := errors.AsType[net.Error](err)
+	if isNetErr || mongo.IsNetworkError(err) || mongo.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return connect.NewError(connect.CodeUnavailable, err)
 	}
 	return connect.NewError(connect.CodeInternal, err)
