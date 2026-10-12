@@ -926,7 +926,7 @@ func streamSendErr(err error) error {
 }
 
 // inserts data and overwrites on conflict
-func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []interface{}, skipBatchOverwrite bool, shardKeyFields []string) error {
+func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []interface{}, skipBatchOverwrite bool, shardKeyFields func() ([]string, error)) error {
 	// eagerly attempt an unordered insert
 	_, bwErr := collection.InsertMany(ctx, documents, options.InsertMany().SetOrdered(false))
 
@@ -940,8 +940,16 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 		if errors.As(bwErr, &bwErrWriteErrors) {
 			for _, we := range bwErrWriteErrors.WriteErrors {
 				if mongo.IsDuplicateKeyError(we.WriteError) {
+					fields, err := shardKeyFields()
+					if err != nil {
+						return err
+					}
 					doc := documents[we.Index].(bson.Raw)
-					bulkOverwrite = append(bulkOverwrite, mongo.NewReplaceOneModel().SetFilter(overwriteFilter(doc, shardKeyFields)).SetReplacement(doc).SetUpsert(true))
+					filter, err := shardKeyFilter(doc, bson.D{{Key: "_id", Value: doc.Lookup("_id")}}, fields)
+					if err != nil {
+						return err
+					}
+					bulkOverwrite = append(bulkOverwrite, mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(doc).SetUpsert(true))
 				} else {
 					if slices.Contains(transientServerCodes, we.Code) {
 						slog.Warn(fmt.Sprintf("Transient failure to insert document into collection: %v", we.WriteError))
@@ -981,12 +989,15 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 
 		// maybe redo them all as a bulk replace
 		if len(bulkOverwrite) > 0 && !skipBatchOverwrite {
-			_, err := collection.BulkWrite(ctx, bulkOverwrite, options.BulkWrite().SetOrdered(false))
+			res, err := collection.BulkWrite(ctx, bulkOverwrite, options.BulkWrite().SetOrdered(false))
+			if res != nil && res.UpsertedCount > 0 {
+				slog.Error(fmt.Sprintf("Overwrite inserted %d documents instead of replacing duplicates in %v (shard key mismatch?): %v", res.UpsertedCount, collection.Name(), slices.Collect(maps.Values(res.UpsertedIDs))[:min(10, len(res.UpsertedIDs))]))
+			}
 			if err != nil {
 				slog.Error(fmt.Sprintf("Failed to overwrite documents in collection: %v", err))
 				if owErr, ok := errors.AsType[mongo.BulkWriteException](err); ok {
 					for _, we := range owErr.WriteErrors[:min(10, len(owErr.WriteErrors))] {
-						slog.Error(fmt.Sprintf("Overwrite failed for %v: %v", bulkOverwrite[we.Index].(*mongo.ReplaceOneModel).Filter, we.Message))
+						slog.Error(fmt.Sprintf("Overwrite failed for %v: code %d: %v", bulkOverwrite[we.Index].(*mongo.ReplaceOneModel).Filter, we.Code, we.Message))
 					}
 				}
 				return err
@@ -996,14 +1007,19 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 	return nil
 }
 
-func overwriteFilter(doc bson.Raw, shardKeyFields []string) bson.D {
-	filter := bson.D{{Key: "_id", Value: doc.Lookup("_id")}}
+func shardKeyFilter(doc bson.Raw, idFilter bson.D, shardKeyFields []string) (bson.D, error) {
+	filter := slices.Clone(idFilter)
 	for _, field := range shardKeyFields {
-		if v, err := doc.LookupErr(strings.Split(field, ".")...); err == nil {
-			filter = append(filter, bson.E{Key: field, Value: v})
+		if slices.ContainsFunc(idFilter, func(e bson.E) bool { return e.Key == field }) {
+			continue
 		}
+		v, err := doc.LookupErr(strings.Split(field, ".")...)
+		if err != nil {
+			return nil, fmt.Errorf("document %v has no shard key field %v: %w", idFilter, field, err)
+		}
+		filter = append(filter, bson.E{Key: field, Value: v})
 	}
-	return filter
+	return filter, nil
 }
 
 func (c *conn) cosmosShardKeyFields(ctx context.Context, col *mongo.Collection) ([]string, error) {
@@ -1018,6 +1034,9 @@ func (c *conn) cosmosShardKeyFields(ctx context.Context, col *mongo.Collection) 
 		ShardKeyDefinition bson.M `bson:"shardKeyDefinition"`
 	}
 	if err := col.Database().RunCommand(ctx, bson.D{{Key: "customAction", Value: "GetCollection"}, {Key: "collection", Value: col.Name()}}).Decode(&res); err != nil {
+		if cmdErr, ok := errors.AsType[mongo.CommandError](err); ok && cmdErr.Code == namespaceNotFoundCode {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get shard key of %v: %w", ns, err)
 	}
 	fields := slices.DeleteFunc(slices.Sorted(maps.Keys(res.ShardKeyDefinition)), func(f string) bool { return f == "_id" })
@@ -1031,10 +1050,7 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("namespace should be fully qualified"))
 	}
-	shardKeyFields, err := c.cosmosShardKeyFields(ctx, col)
-	if err != nil {
-		return nil, maybeUnavailableError(err)
-	}
+	shardKeyFields := sync.OnceValues(func() ([]string, error) { return c.cosmosShardKeyFields(ctx, col) })
 	var batch []interface{}
 	for _, data := range r.Msg.GetData() {
 		doc, err := c.cosmosValidTTL(r.Msg.GetNamespace(), bson.Raw(data), nil)
@@ -1164,7 +1180,7 @@ func (c *conn) cosmosValidTTL(namespace string, raw bson.Raw, idFilter bson.D) (
 // Iterates updates in reverse so that per-ID dedup keeps the last (chronological) operation.
 // When the last operation for an ID is a partial update, earlier operations for the same ID
 // are kept as ordered models so they execute in sequence before the unordered batch.
-func (c *conn) buildBulkModels(namespace string, updates []*adiomv1.Update) ([]mongo.WriteModel, bool, error) {
+func (c *conn) buildBulkModels(namespace string, updates []*adiomv1.Update, shardKeyFields []string) ([]mongo.WriteModel, bool, error) {
 	var models []mongo.WriteModel
 	var orderedModels []mongo.WriteModel
 
@@ -1190,7 +1206,11 @@ func (c *conn) buildBulkModels(namespace string, updates []*adiomv1.Update) ([]m
 			if err != nil {
 				return nil, false, err
 			}
-			model := mongo.NewReplaceOneModel().SetFilter(idFilter).SetReplacement(replacement).SetUpsert(true)
+			filter, err := shardKeyFilter(replacement, idFilter, shardKeyFields)
+			if err != nil {
+				return nil, false, err
+			}
+			model := mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(replacement).SetUpsert(true)
 			if isNew {
 				models = append(models, model)
 			} else if lastType == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
@@ -1260,7 +1280,11 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("namespace should be fully qualified"))
 	}
 
-	finalModels, ordered, err := c.buildBulkModels(r.Msg.GetNamespace(), r.Msg.GetUpdates())
+	shardKeyFields, err := c.cosmosShardKeyFields(ctx, col)
+	if err != nil {
+		return nil, maybeUnavailableError(err)
+	}
+	finalModels, ordered, err := c.buildBulkModels(r.Msg.GetNamespace(), r.Msg.GetUpdates(), shardKeyFields)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
@@ -1355,6 +1379,7 @@ func (c *conn) changeStreamOpts(cursor []byte) *moptions.ChangeStreamOptionsBuil
 }
 
 const cosmosTooManyRequestsCode = 16500
+const namespaceNotFoundCode = 26
 
 var transientServerCodes = []int{6, 7, 50, 64, 89, 91, 134, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436, cosmosTooManyRequestsCode}
 
