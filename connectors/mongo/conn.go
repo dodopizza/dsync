@@ -42,6 +42,7 @@ type ConnectorSettings struct {
 	PerNamespaceStreams        bool
 	SkipBatchOverwrite         bool
 	FullDocumentKey            bool
+	PageBufferTTL              time.Duration
 
 	Query string // query filter, as a v2 Extended JSON string, e.g., '{\"x\":{\"$gt\":1}}'"
 }
@@ -77,12 +78,11 @@ type conn struct {
 	settings ConnectorSettings
 	flavor   MongoFlavor
 
-	nextCursorID    atomic.Int64
-	ctx             context.Context
-	cancel          context.CancelFunc
-	buffersMutex    sync.RWMutex
-	buffers         map[int64]buffer
-	cleanupInterval time.Duration
+	nextCursorID atomic.Int64
+	ctx          context.Context
+	cancel       context.CancelFunc
+	buffersMutex sync.RWMutex
+	buffers      map[int64]buffer
 
 	query bson.D
 }
@@ -532,7 +532,7 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 			ctr:  0,
 			ch:   ch,
 			last: nil,
-			cleanup: time.AfterFunc(c.cleanupInterval, func() {
+			cleanup: time.AfterFunc(c.settings.PageBufferTTL, func() {
 				c.buffersMutex.Lock()
 				delete(c.buffers, cursorID)
 				c.buffersMutex.Unlock()
@@ -591,7 +591,7 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid cursor"))
 	}
-	buffer.cleanup.Reset(c.cleanupInterval)
+	buffer.cleanup.Reset(c.settings.PageBufferTTL)
 	if buffer.err != nil {
 		return nil, connect.NewError(connect.CodeInternal, buffer.err)
 	}
@@ -626,7 +626,7 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 				NextCursor: nextCursor,
 			}
 			buffer.last = resp
-			buffer.cleanup.Reset(c.cleanupInterval)
+			buffer.cleanup.Reset(c.settings.PageBufferTTL)
 			c.buffersMutex.Lock()
 			c.buffers[cursorID] = buffer
 			c.buffersMutex.Unlock()
@@ -1213,20 +1213,20 @@ func NewConn(connSettings ConnectorSettings) (adiomv1connect.ConnectorServiceHan
 }
 
 func NewConnWithClient(client *mongo.Client, settings ConnectorSettings) (adiomv1connect.ConnectorServiceHandler, error) {
+	setDefault(&settings.PageBufferTTL, time.Hour)
 	query, err := stringToQuery(settings.Query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse query (%v): %w", settings.Query, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &conn{
-		client:          client,
-		settings:        settings,
-		flavor:          GetMongoFlavor(settings.ConnectionString),
-		ctx:             ctx,
-		cancel:          cancel,
-		buffers:         map[int64]buffer{},
-		cleanupInterval: 5 * time.Minute,
-		query:           query,
+		client:   client,
+		settings: settings,
+		flavor:   GetMongoFlavor(settings.ConnectionString),
+		ctx:      ctx,
+		cancel:   cancel,
+		buffers:  map[int64]buffer{},
+		query:    query,
 	}, nil
 }
 

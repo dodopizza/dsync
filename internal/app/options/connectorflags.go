@@ -734,6 +734,7 @@ func mongoBaseSettingsFromFlags(f *connectorsv1.MongoBaseFlags, connString strin
 	s.MaxPageSize = int(f.MaxPageSize)
 	s.NamespaceFanout = int(f.NamespaceFanout)
 	s.Query = f.InitialSyncQuery
+	s.PageBufferTTL = f.PageBufferTtl.AsDuration()
 	return s
 }
 

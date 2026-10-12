@@ -7,6 +7,7 @@ package mongo
 
 import (
 	"testing"
+	"time"
 
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/stretchr/testify/assert"
@@ -394,6 +395,15 @@ func TestIDTypeAliasesCoverOrdinaryIDTypes(t *testing.T) {
 func TestNewConnWithClientRejectsInvalidQuery(t *testing.T) {
 	_, err := NewConnWithClient(nil, ConnectorSettings{Query: "{bad"})
 	assert.Error(t, err)
+}
+
+func TestNewConnWithClientPageBufferTTL(t *testing.T) {
+	c, err := NewConnWithClient(nil, ConnectorSettings{})
+	require.NoError(t, err)
+	assert.Equal(t, time.Hour, c.(*conn).settings.PageBufferTTL)
+	c, err = NewConnWithClient(nil, ConnectorSettings{PageBufferTTL: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, time.Minute, c.(*conn).settings.PageBufferTTL)
 }
 
 func TestAndFilter(t *testing.T) {

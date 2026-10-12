@@ -4,6 +4,7 @@ package connectorsv1
 
 import (
 	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	time "time"
 )
 
 import "github.com/urfave/cli/v2"
@@ -43,6 +44,11 @@ func MongoBaseFlagsCommandFlags() []cli.Flag {
 			Usage: "maximum number of namespaces to plan concurrently",
 			Value: 100,
 		},
+		&cli.DurationFlag{
+			Name:  "page-buffer-ttl",
+			Usage: "how long an initial sync read buffer waits for the writer to request its next page",
+			Value: func() time.Duration { d, _ := time.ParseDuration("1h"); return d }(),
+		},
 	}
 }
 
@@ -57,6 +63,7 @@ func ParseMongoBaseFlags(c *cli.Context) (*MongoBaseFlags, error) {
 	cfg.MaxPageSize = int32(c.Int("max-page-size"))
 	cfg.InitialSyncQuery = c.String("initial-sync-query")
 	cfg.NamespaceFanout = int32(c.Int("namespace-fanout"))
+	cfg.PageBufferTtl = durationpb.New(c.Duration("page-buffer-ttl"))
 	return cfg, nil
 }
 
@@ -113,6 +120,11 @@ func MongoFlagsCommandFlags() []cli.Flag {
 			Usage: "maximum number of namespaces to plan concurrently",
 			Value: 100,
 		},
+		&cli.DurationFlag{
+			Name:  "page-buffer-ttl",
+			Usage: "how long an initial sync read buffer waits for the writer to request its next page",
+			Value: func() time.Duration { d, _ := time.ParseDuration("1h"); return d }(),
+		},
 		&cli.IntFlag{
 			Name:  "sample-factor",
 			Usage: "Number of extra samples per partition",
@@ -143,6 +155,7 @@ func ParseMongoFlags(c *cli.Context) (*MongoFlags, error) {
 	cfg.Base.MaxPageSize = int32(c.Int("max-page-size"))
 	cfg.Base.InitialSyncQuery = c.String("initial-sync-query")
 	cfg.Base.NamespaceFanout = int32(c.Int("namespace-fanout"))
+	cfg.Base.PageBufferTtl = durationpb.New(c.Duration("page-buffer-ttl"))
 	cfg.SampleFactor = int32(c.Int("sample-factor"))
 	cfg.PerNamespaceStreams = c.Bool("per-namespace-streams")
 	cfg.DocumentdbSamplingFanout = int32(c.Int("documentdb-sampling-fanout"))
