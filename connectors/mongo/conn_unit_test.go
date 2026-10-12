@@ -6,14 +6,21 @@
 package mongo
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/topology"
 )
 
 // helpers
@@ -413,4 +420,26 @@ func TestAndFilter(t *testing.T) {
 	assert.Equal(t, b, andFilter(bson.D{}, b))
 	assert.Equal(t, bson.D{{"$and", bson.A{a, b}}}, andFilter(a, b))
 	assert.NotNil(t, andFilter(bson.D{}, nil))
+}
+
+func TestMaybeUnavailableErrorClassifiesSourceFailures(t *testing.T) {
+	dnsTimeout := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "client timed out waiting for server response", Name: "mongos", IsTimeout: true}}
+	cases := map[string]struct {
+		err  error
+		code connect.Code
+	}{
+		"labeled network error":    {mongo.CommandError{Labels: []string{"NetworkError"}, Wrapped: io.EOF}, connect.CodeUnavailable},
+		"handshake dns timeout":    {topology.ConnectionError{Wrapped: dnsTimeout}, connect.CodeUnavailable},
+		"server selection timeout": {topology.ServerSelectionError{Wrapped: context.DeadlineExceeded}, connect.CodeUnavailable},
+		"driver deadline":          {fmt.Errorf("find: %w", context.DeadlineExceeded), connect.CodeUnavailable},
+		"server maxTimeMS":         {mongo.CommandError{Code: 50, Name: "MaxTimeMSExpired"}, connect.CodeUnavailable},
+		"cancelled flow":           {topology.ConnectionError{Wrapped: context.Canceled}, connect.CodeCanceled},
+		"auth failure":             {mongo.CommandError{Code: 13, Name: "Unauthorized"}, connect.CodeInternal},
+		"unknown":                  {errors.New("boom"), connect.CodeInternal},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.code, connect.CodeOf(maybeUnavailableError(tc.err)))
+		})
+	}
 }

@@ -548,7 +548,7 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 				slog.Debug("Find Error", "filter", filter)
 				slog.Error(fmt.Sprintf("Failed to find documents: %v", err))
 			}
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, maybeUnavailableError(err)
 		}
 		go func(ctx context.Context) {
 			defer cursor.Close(ctx)
@@ -593,7 +593,7 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 	}
 	buffer.cleanup.Reset(c.settings.PageBufferTTL)
 	if buffer.err != nil {
-		return nil, connect.NewError(connect.CodeInternal, buffer.err)
+		return nil, maybeUnavailableError(buffer.err)
 	}
 	if ctr+1 == buffer.ctr && buffer.last != nil {
 		return connect.NewResponse(buffer.last), nil
@@ -610,7 +610,7 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 				c.buffersMutex.Lock()
 				c.buffers[cursorID] = buffer
 				c.buffersMutex.Unlock()
-				return nil, connect.NewError(connect.CodeInternal, buffer.err)
+				return nil, maybeUnavailableError(buffer.err)
 			}
 			var nextCursor []byte
 			if !ok {
@@ -1255,11 +1255,13 @@ func (c *conn) changeStreamOpts(cursor []byte) *moptions.ChangeStreamOptionsBuil
 }
 
 func maybeUnavailableError(err error) error {
-	if mongo.IsNetworkError(err) {
+	if errors.Is(err, context.Canceled) {
+		return connect.NewError(connect.CodeCanceled, err)
+	}
+	if mongo.IsNetworkError(err) || mongo.IsTimeout(err) {
 		return connect.NewError(connect.CodeUnavailable, err)
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); ok {
 		return connect.NewError(connect.CodeUnavailable, err)
 	}
 	return connect.NewError(connect.CodeInternal, err)
