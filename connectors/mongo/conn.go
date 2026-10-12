@@ -690,7 +690,7 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 		}
 	}
 	if changeStream.Err() != nil {
-		if errors.Is(changeStream.Err(), context.Canceled) {
+		if errors.Is(changeStream.Err(), context.Canceled) || ctx.Err() != nil {
 			return nil
 		}
 		return connect.NewError(connect.CodeInternal, changeStream.Err())

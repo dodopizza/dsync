@@ -239,6 +239,7 @@ func runDsync(c *cli.Context) error {
 		NumParallelWriters:             o.NumParallelWriters,
 		NumParallelIntegrityCheckTasks: o.NumParallelIntegrityCheckTasks,
 		CdcResumeTokenUpdateInterval:   o.CdcResumeTokenUpdateInterval,
+		CdcResumeTokenCheckInterval:    o.CdcResumeTokenCheckInterval,
 		WriterMaxBatchSize:             o.WriterMaxBatchSize,
 		MultinamespaceBatcher:          o.MultinamespaceBatcher,
 		SyncMode:                       o.Mode,

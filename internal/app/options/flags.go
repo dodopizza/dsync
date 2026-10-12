@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/adiom-data/dsync/protocol/iface"
 	"github.com/urfave/cli/v2"
@@ -162,6 +163,12 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 			Name:     "cdc-resume-token-interval",
 			Required: false,
 			Hidden:   true,
+		}),
+		altsrc.NewDurationFlag(&cli.DurationFlag{
+			Name:     "cdc-resume-token-check-interval",
+			Usage:    "MongoDB sources: during initial sync, how often to verify the CDC start point is still in the source oplog (fail fast if lost, 0 disables)",
+			Value:    time.Hour,
+			Required: false,
 		}),
 		altsrc.NewBoolFlag(&cli.BoolFlag{
 			Name:     "namespace-batcher",

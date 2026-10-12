@@ -39,6 +39,7 @@ type Options struct {
 	NumParallelWriters             int
 	NumParallelIntegrityCheckTasks int
 	CdcResumeTokenUpdateInterval   time.Duration
+	CdcResumeTokenCheckInterval    time.Duration
 	WriterMaxBatchSize             int
 	MultinamespaceBatcher          bool
 	Mode                           string
@@ -75,6 +76,7 @@ func NewFromCLIContext(c *cli.Context) (Options, error) {
 	o.NumParallelWriters = c.Int("parallel-writers")
 	o.NumParallelIntegrityCheckTasks = c.Int("parallel-integrity-check-workers")
 	o.CdcResumeTokenUpdateInterval = c.Duration("cdc-resume-token-interval")
+	o.CdcResumeTokenCheckInterval = c.Duration("cdc-resume-token-check-interval")
 	o.WriterMaxBatchSize = c.Int("writer-batch-size")
 	o.MultinamespaceBatcher = c.Bool("namespace-batcher")
 	o.Mode = c.String("mode")

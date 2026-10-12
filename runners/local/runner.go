@@ -76,6 +76,7 @@ type RunnerLocalSettings struct {
 	NumParallelWriters             int
 	NumParallelIntegrityCheckTasks int
 	CdcResumeTokenUpdateInterval   time.Duration
+	CdcResumeTokenCheckInterval    time.Duration
 	WriterMaxBatchSize             int
 	SyncMode                       string
 	MultinamespaceBatcher          bool
@@ -108,6 +109,7 @@ func NewRunnerLocal(settings RunnerLocalSettings) *RunnerLocal {
 		MaxWriterBatchSize:        settings.WriterMaxBatchSize,
 		MultinamespaceBatcher:     settings.MultinamespaceBatcher,
 		ResumeTokenUpdateInterval: settings.CdcResumeTokenUpdateInterval,
+		ResumeTokenCheckInterval:  settings.CdcResumeTokenCheckInterval,
 		TransformClient:           settings.TransformClient,
 		SourceDataType:            settings.SrcDataType,
 		DestinationDataType:       settings.DstDataType,
