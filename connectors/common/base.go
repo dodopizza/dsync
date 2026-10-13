@@ -887,11 +887,12 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 							}
 
 							dataChannel <- iface.DataMessage{
-								Data:         &d.Data,
-								MutationType: mutationType,
-								Loc:          destNs,
-								Id:           d.GetId(),
-								SeqNum:       lsn,
+								Data:               &d.Data,
+								PartialUpdateUnset: d.GetPartialUpdateUnset(),
+								MutationType:       mutationType,
+								Loc:                destNs,
+								Id:                 d.GetId(),
+								SeqNum:             lsn,
 							}
 						}
 					}
@@ -913,11 +914,12 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 						}
 
 						dataChannel <- iface.DataMessage{
-							Data:         &d.Data,
-							MutationType: mutationType,
-							Loc:          destinationNamespace,
-							Id:           d.GetId(),
-							SeqNum:       lsn,
+							Data:               &d.Data,
+							PartialUpdateUnset: d.GetPartialUpdateUnset(),
+							MutationType:       mutationType,
+							Loc:                destinationNamespace,
+							Id:                 d.GetId(),
+							SeqNum:             lsn,
 						}
 					}
 				}
@@ -939,11 +941,12 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 					lsn++
 
 					dataChannel <- iface.DataMessage{
-						Data:         &d.Data,
-						MutationType: mutationType,
-						Loc:          destinationNamespace,
-						Id:           d.GetId(),
-						SeqNum:       lsn,
+						Data:               &d.Data,
+						PartialUpdateUnset: d.GetPartialUpdateUnset(),
+						MutationType:       mutationType,
+						Loc:                destinationNamespace,
+						Id:                 d.GetId(),
+						SeqNum:             lsn,
 					}
 				}
 			}
@@ -1229,14 +1232,16 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 				Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE,
 			})
 		case iface.MutationType_Apply:
-			if dataMsg.Data == nil || len(*dataMsg.Data) == 0 {
+			update := &adiomv1.Update{
+				Id:                 dataMsg.Id,
+				Type:               adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE,
+				Data:               *dataMsg.Data,
+				PartialUpdateUnset: dataMsg.PartialUpdateUnset,
+			}
+			if IsEmptyPartialUpdate(update) {
 				continue
 			}
-			msgs = append(msgs, &adiomv1.Update{
-				Id:   dataMsg.Id,
-				Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE,
-				Data: *dataMsg.Data,
-			})
+			msgs = append(msgs, update)
 		default:
 			slog.Error(fmt.Sprintf("unsupported operation type during batch: %v", dataMsg.MutationType))
 		}

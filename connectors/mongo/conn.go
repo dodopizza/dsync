@@ -747,7 +747,6 @@ func convertChangeStreamEventToUpdate(change MongoUpdate, fullDocumentKey bool) 
 			Data: change.FullDocument,
 		}
 	case "update", "replace":
-		// get the full state of the document after the change
 		if len(change.FullDocument) == 0 {
 			return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE}, nil
 		}
