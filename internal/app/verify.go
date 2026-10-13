@@ -126,7 +126,7 @@ func (s *source) readUpdates(ctx context.Context, partitions []*adiomv1.UpdatesP
 			for s.Receive() {
 				msg := s.Msg()
 				for _, update := range msg.GetUpdates() {
-					if common.IsEmptyPartialUpdate(update) {
+					if update.GetType() == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
 						continue
 					}
 					var idBson []bson.RawValue
