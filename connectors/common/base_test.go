@@ -357,6 +357,6 @@ func TestCDCTransformNotCalledForOnlyEmptyPartials(t *testing.T) {
 
 	require.Empty(t, transformed)
 	require.Len(t, msgs, 1)
-	require.Equal(t, iface.MutationType_Apply, msgs[0].MutationType)
+	require.EqualValues(t, iface.MutationType_Apply, msgs[0].MutationType)
 	require.Equal(t, int64(1), msgs[0].SeqNum)
 }
