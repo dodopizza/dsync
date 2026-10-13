@@ -3,7 +3,7 @@ package common
 import (
 	"context"
 	"errors"
-	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -263,16 +263,25 @@ func TestProcessDataMessagesWritesUnsetOnlyPartial(t *testing.T) {
 }
 
 func TestProcessDataMessagesKeepsWriteLSNOnSinkError(t *testing.T) {
-	c, _ := writerConnector(t, writeUpdatesHandler{err: connect.NewError(connect.CodeInvalidArgument, errors.New("sink down"))})
 	a := []byte("a")
 	var empty []byte
+	emptyPartial := iface.DataMessage{MutationType: iface.MutationType_Apply, Data: &empty, Loc: "db.col"}
+	insert := iface.DataMessage{MutationType: iface.MutationType_Insert, Data: &a, Loc: "db.col"}
+	for name, batch := range map[string][]iface.DataMessage{
+		"empty first":  {emptyPartial, insert},
+		"insert first": {insert, emptyPartial},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, _ := writerConnector(t, writeUpdatesHandler{err: connect.NewError(connect.CodeInvalidArgument, errors.New("sink down"))})
+			c.progressTracker.UpdateWriteLSN(5)
+			batch = slices.Clone(batch)
+			batch[0].SeqNum, batch[1].SeqNum = 6, 7
 
-	require.Error(t, c.ProcessDataMessages([]iface.DataMessage{
-		{MutationType: iface.MutationType_Apply, Data: &empty, Loc: "db.col", SeqNum: 1},
-		{MutationType: iface.MutationType_Insert, Data: &a, Loc: "db.col", SeqNum: 2},
-	}))
+			require.Error(t, c.ProcessDataMessages(batch))
 
-	require.Zero(t, c.progressTracker.CopyStatus().WriteLSN)
+			require.Equal(t, int64(5), c.progressTracker.CopyStatus().WriteLSN)
+		})
+	}
 }
 
 func TestProcessDataMessagesDropsEmptyPartialBetweenWrites(t *testing.T) {
@@ -300,8 +309,8 @@ type cdcSourceHandler struct {
 	updates []*adiomv1.Update
 }
 
-func (cdcSourceHandler) StreamLSN(context.Context, *connect.Request[adiomv1.StreamLSNRequest], *connect.ServerStream[adiomv1.StreamLSNResponse]) error {
-	return nil
+func (h cdcSourceHandler) StreamLSN(_ context.Context, _ *connect.Request[adiomv1.StreamLSNRequest], s *connect.ServerStream[adiomv1.StreamLSNResponse]) error {
+	return s.Send(&adiomv1.StreamLSNResponse{Lsn: uint64(len(h.updates))})
 }
 
 func (h cdcSourceHandler) StreamUpdates(_ context.Context, _ *connect.Request[adiomv1.StreamUpdatesRequest], s *connect.ServerStream[adiomv1.StreamUpdatesResponse]) error {
@@ -310,21 +319,25 @@ func (h cdcSourceHandler) StreamUpdates(_ context.Context, _ *connect.Request[ad
 
 type recordingTransform struct {
 	adiomv1connect.UnimplementedTransformServiceHandler
-	requests chan<- []*adiomv1.Update
+	requests  chan<- []*adiomv1.Update
+	responses bool
 }
 
 func (h recordingTransform) GetTransform(_ context.Context, r *connect.Request[adiomv1.GetTransformRequest]) (*connect.Response[adiomv1.GetTransformResponse], error) {
 	h.requests <- r.Msg.GetUpdates()
+	if h.responses {
+		return connect.NewResponse(&adiomv1.GetTransformResponse{Responses: []*adiomv1.TransformResponse{{Namespace: r.Msg.GetNamespace(), Updates: r.Msg.GetUpdates()}}}), nil
+	}
 	return connect.NewResponse(&adiomv1.GetTransformResponse{Namespace: r.Msg.GetNamespace(), Updates: r.Msg.GetUpdates()}), nil
 }
 
-func runCDC(t *testing.T, updates []*adiomv1.Update, withTransform bool) ([]iface.DataMessage, [][]*adiomv1.Update) {
+func runCDC(t *testing.T, updates []*adiomv1.Update, transform string) ([]iface.DataMessage, [][]*adiomv1.Update, int64) {
 	_, handler := adiomv1connect.NewConnectorServiceHandler(cdcSourceHandler{updates: updates})
 	srv, err := memhttp.New(handler)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Close() })
 	requests := make(chan []*adiomv1.Update, 4)
-	_, transformHandler := adiomv1connect.NewTransformServiceHandler(recordingTransform{requests: requests})
+	_, transformHandler := adiomv1connect.NewTransformServiceHandler(recordingTransform{requests: requests, responses: transform == "responses"})
 	transformSrv, err := memhttp.New(transformHandler)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = transformSrv.Close() })
@@ -345,7 +358,7 @@ func runCDC(t *testing.T, updates []*adiomv1.Update, withTransform bool) ([]ifac
 		progressTracker:    NewProgressTracker(&status, t.Context()),
 		settings:           ConnectorSettings{ResumeTokenUpdateInterval: time.Hour},
 	}
-	if withTransform {
+	if transform != "" {
 		c.settings.TransformClient = adiomv1connect.NewTransformServiceClient(transformSrv.Client(), transformSrv.URL())
 	}
 	require.NoError(t, c.StartReadToChannel("flow", iface.ConnectorOptions{Mode: iface.SyncModeCDC}, iface.ConnectorReadPlan{}, "data"))
@@ -375,15 +388,15 @@ collect:
 	for r := range requests {
 		transformed = append(transformed, r)
 	}
-	return msgs, transformed
+	return msgs, transformed, c.progressTracker.CopyStatus().WriteLSN
 }
 
 func TestCDCTransformSkipsEmptyPartialButCountsItInLSN(t *testing.T) {
-	msgs, transformed := runCDC(t, []*adiomv1.Update{
+	msgs, transformed, _ := runCDC(t, []*adiomv1.Update{
 		{Id: []*adiomv1.BsonValue{{Data: []byte("a")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT, Data: []byte("a")},
 		{Id: []*adiomv1.BsonValue{{Data: []byte("b")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE},
 		{Id: []*adiomv1.BsonValue{{Data: []byte("c")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT, Data: []byte("c")},
-	}, true)
+	}, "updates")
 
 	require.Len(t, transformed, 1)
 	require.Len(t, transformed[0], 2)
@@ -394,9 +407,9 @@ func TestCDCTransformSkipsEmptyPartialButCountsItInLSN(t *testing.T) {
 }
 
 func TestCDCTransformNotCalledForOnlyEmptyPartials(t *testing.T) {
-	msgs, transformed := runCDC(t, []*adiomv1.Update{
+	msgs, transformed, _ := runCDC(t, []*adiomv1.Update{
 		{Id: []*adiomv1.BsonValue{{Data: []byte("b")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE},
-	}, true)
+	}, "updates")
 
 	require.Empty(t, transformed)
 	require.Len(t, msgs, 1)
@@ -404,15 +417,45 @@ func TestCDCTransformNotCalledForOnlyEmptyPartials(t *testing.T) {
 	require.Equal(t, int64(1), msgs[0].SeqNum)
 }
 
-func TestCDCCarriesPartialUpdateUnset(t *testing.T) {
-	for _, withTransform := range []bool{false, true} {
-		t.Run(fmt.Sprint("transform=", withTransform), func(t *testing.T) {
-			msgs, _ := runCDC(t, []*adiomv1.Update{
-				{Id: []*adiomv1.BsonValue{{Data: []byte("b")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, PartialUpdateUnset: []string{"f"}},
-			}, withTransform)
+var transformModes = []string{"", "updates", "responses"}
+
+func TestCDCCarriesPartialUpdateSetAndUnset(t *testing.T) {
+	for _, transform := range transformModes {
+		t.Run("transform="+transform, func(t *testing.T) {
+			msgs, _, _ := runCDC(t, []*adiomv1.Update{
+				{Id: []*adiomv1.BsonValue{{Data: []byte("b")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, Data: []byte("set"), PartialUpdateUnset: []string{"f"}},
+			}, transform)
 
 			require.Len(t, msgs, 1)
+			require.Equal(t, []byte("set"), *msgs[0].Data)
 			require.Equal(t, []string{"f"}, msgs[0].PartialUpdateUnset)
+		})
+	}
+}
+
+func TestCDCDestinationLSNCatchesUpWithSource(t *testing.T) {
+	for _, transform := range transformModes {
+		t.Run("transform="+transform, func(t *testing.T) {
+			msgs, _, srcLSN := runCDC(t, []*adiomv1.Update{
+				{Id: []*adiomv1.BsonValue{{Data: []byte("a")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT, Data: []byte("a")},
+				{Id: []*adiomv1.BsonValue{{Data: []byte("b")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE},
+				{Id: []*adiomv1.BsonValue{{Data: []byte("c")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, Data: []byte("set"), PartialUpdateUnset: []string{"f"}},
+				{Id: []*adiomv1.BsonValue{{Data: []byte("d")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE},
+			}, transform)
+			c, calls := writerConnector(t, writeUpdatesHandler{allowPartial: true})
+
+			require.NoError(t, c.ProcessDataMessages(msgs))
+
+			require.Equal(t, int64(4), srcLSN)
+			require.Equal(t, srcLSN, c.progressTracker.CopyStatus().WriteLSN)
+			require.Len(t, *calls, 1)
+			written := (*calls)[0]
+			require.Len(t, written, 3)
+			require.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_INSERT, written[0].GetType())
+			require.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, written[1].GetType())
+			require.Equal(t, []byte("set"), written[1].GetData())
+			require.Equal(t, []string{"f"}, written[1].GetPartialUpdateUnset())
+			require.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_DELETE, written[2].GetType())
 		})
 	}
 }
