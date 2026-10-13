@@ -424,11 +424,14 @@ func TestCDCCarriesPartialUpdateSetAndUnset(t *testing.T) {
 		t.Run("transform="+transform, func(t *testing.T) {
 			msgs, _, _ := runCDC(t, []*adiomv1.Update{
 				{Id: []*adiomv1.BsonValue{{Data: []byte("b")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, Data: []byte("set"), PartialUpdateUnset: []string{"f"}},
+				{Id: []*adiomv1.BsonValue{{Data: []byte("c")}}, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, PartialUpdateUnset: []string{"g"}},
 			}, transform)
 
-			require.Len(t, msgs, 1)
-			require.Equal(t, []byte("set"), *msgs[0].Data)
+			require.Len(t, msgs, 2)
+			require.Equal(t, "set", string(*msgs[0].Data))
 			require.Equal(t, []string{"f"}, msgs[0].PartialUpdateUnset)
+			require.Empty(t, string(*msgs[1].Data))
+			require.Equal(t, []string{"g"}, msgs[1].PartialUpdateUnset)
 		})
 	}
 }
