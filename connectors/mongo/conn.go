@@ -749,8 +749,7 @@ func convertChangeStreamEventToUpdate(change MongoUpdate, fullDocumentKey bool) 
 	case "update", "replace":
 		// get the full state of the document after the change
 		if len(change.FullDocument) == 0 {
-			//TODO (AK, 6/2024): find a better way to report that we need to ignore this event
-			return nil, nil // no full document, nothing to do (probably got deleted before we got to the event in the change stream)
+			return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE}, nil
 		}
 		update = &adiomv1.Update{
 			Id:   id,
@@ -852,9 +851,6 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		update, err := convertChangeStreamEventToUpdate(change, c.settings.FullDocumentKey)
 		if err != nil {
 			return connect.NewError(connect.CodeInternal, fmt.Errorf("failed to convert change stream event: %w", err))
-		}
-		if update == nil {
-			continue
 		}
 
 		db := change.NS["db"].(string)
