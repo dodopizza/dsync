@@ -107,6 +107,10 @@ func (c *connector) GetConnectorStatus(flowId iface.FlowID) iface.ConnectorStatu
 	return c.progressTracker.CopyStatus()
 }
 
+func IsEmptyPartialUpdate(u *adiomv1.Update) bool {
+	return u.GetType() == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE && len(u.GetData()) == 0 && len(u.GetPartialUpdateUnset()) == 0
+}
+
 func IDPartToString(a any) string {
 	switch t := a.(type) {
 	case bson.ObjectID:
@@ -838,11 +842,15 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			destinationNamespace := c.mapNamespace(msg.GetNamespace())
 
 			updates := msg.GetUpdates()
+			var transformable []*adiomv1.Update
+			if c.settings.TransformClient != nil {
+				transformable = slices.DeleteFunc(slices.Clone(updates), IsEmptyPartialUpdate)
+			}
 
-			if c.settings.TransformClient != nil && len(updates) > 0 {
+			if len(transformable) > 0 {
 				transformed, err := c.settings.TransformClient.GetTransform(c.flowCtx, connect.NewRequest(&adiomv1.GetTransformRequest{
 					Namespace:    msg.GetNamespace(),
-					Updates:      updates,
+					Updates:      transformable,
 					RequestType:  c.settings.SourceDataType,
 					ResponseType: c.settings.DestinationDataType,
 				}))
@@ -879,11 +887,12 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 							}
 
 							dataChannel <- iface.DataMessage{
-								Data:         &d.Data,
-								MutationType: mutationType,
-								Loc:          destNs,
-								Id:           d.GetId(),
-								SeqNum:       lsn,
+								Data:               &d.Data,
+								PartialUpdateUnset: d.GetPartialUpdateUnset(),
+								MutationType:       mutationType,
+								Loc:                destNs,
+								Id:                 d.GetId(),
+								SeqNum:             lsn,
 							}
 						}
 					}
@@ -905,11 +914,12 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 						}
 
 						dataChannel <- iface.DataMessage{
-							Data:         &d.Data,
-							MutationType: mutationType,
-							Loc:          destinationNamespace,
-							Id:           d.GetId(),
-							SeqNum:       lsn,
+							Data:               &d.Data,
+							PartialUpdateUnset: d.GetPartialUpdateUnset(),
+							MutationType:       mutationType,
+							Loc:                destinationNamespace,
+							Id:                 d.GetId(),
+							SeqNum:             lsn,
 						}
 					}
 				}
@@ -931,11 +941,12 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 					lsn++
 
 					dataChannel <- iface.DataMessage{
-						Data:         &d.Data,
-						MutationType: mutationType,
-						Loc:          destinationNamespace,
-						Id:           d.GetId(),
-						SeqNum:       lsn,
+						Data:               &d.Data,
+						PartialUpdateUnset: d.GetPartialUpdateUnset(),
+						MutationType:       mutationType,
+						Loc:                destinationNamespace,
+						Id:                 d.GetId(),
+						SeqNum:             lsn,
 					}
 				}
 			}
@@ -1221,11 +1232,16 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 				Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE,
 			})
 		case iface.MutationType_Apply:
-			msgs = append(msgs, &adiomv1.Update{
-				Id:   dataMsg.Id,
-				Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE,
-				Data: *dataMsg.Data,
-			})
+			update := &adiomv1.Update{
+				Id:                 dataMsg.Id,
+				Type:               adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE,
+				Data:               *dataMsg.Data,
+				PartialUpdateUnset: dataMsg.PartialUpdateUnset,
+			}
+			if IsEmptyPartialUpdate(update) {
+				continue
+			}
+			msgs = append(msgs, update)
 		default:
 			slog.Error(fmt.Sprintf("unsupported operation type during batch: %v", dataMsg.MutationType))
 		}
@@ -1251,6 +1267,8 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 		}, backoffConfig); err != nil {
 			return err
 		}
+	}
+	if len(dataMsgs) > 0 {
 		c.progressTracker.UpdateWriteLSN(dataMsgs[len(dataMsgs)-1].SeqNum)
 	}
 	return nil
