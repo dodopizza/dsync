@@ -539,3 +539,31 @@ func TestShardKeyFilter_MissingFieldFails(t *testing.T) {
 	_, err := shardKeyFilter(raw, bson.D{{Key: "_id", Value: "x"}}, []string{"PartitionId"})
 	require.Error(t, err)
 }
+
+func TestConvertChangeStreamEvent_UpdateWithoutFullDocumentIsEmptyPartial(t *testing.T) {
+	update, err := convertChangeStreamEventToUpdate(MongoUpdate{
+		OperationType: "update",
+		DocumentKey:   bson.D{{Key: "_id", Value: "a"}},
+	}, false)
+	require.NoError(t, err)
+	require.NotNil(t, update)
+	assert.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, update.GetType())
+	assert.Empty(t, update.GetData())
+	assert.Empty(t, update.GetPartialUpdateUnset())
+	require.Len(t, update.GetId(), 1)
+	assert.Equal(t, bsonID(t, "_id", "a").GetData(), update.GetId()[0].GetData())
+}
+
+func TestConvertChangeStreamEvent_ReplaceWithoutFullDocumentIsEmptyPartial(t *testing.T) {
+	update, err := convertChangeStreamEventToUpdate(MongoUpdate{
+		OperationType: "replace",
+		DocumentKey:   bson.D{{Key: "PartitionId", Value: "p"}, {Key: "_id", Value: "a"}},
+	}, true)
+	require.NoError(t, err)
+	require.NotNil(t, update)
+	assert.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, update.GetType())
+	assert.Empty(t, update.GetData())
+	require.Len(t, update.GetId(), 2)
+	assert.Equal(t, "PartitionId", update.GetId()[0].GetName())
+	assert.Equal(t, "_id", update.GetId()[1].GetName())
+}
