@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/adiom-data/dsync/connectors/airbyte"
@@ -35,8 +37,25 @@ var ErrMissingConnector = errors.New("missing or unsupported connector")
 var ErrHelp = errors.New("connector help used")
 var ErrInvalidUsage = errors.New("invalid command-line flags, see --help")
 
-func HideUsageValues(*cli.Context, error, bool) error {
-	return ErrInvalidUsage
+var usageErrorFlagName = regexp.MustCompile(`^(?:invalid (?:boolean )?value "(?:[^"\\]|\\.)*" for (?:flag )?-|flag needs an argument: -)([A-Za-z0-9][A-Za-z0-9_-]*)(?::|$)`)
+
+func HideUsageValues(c *cli.Context, err error, subcommand bool) error {
+	usageErr := ErrInvalidUsage
+	if m := usageErrorFlagName.FindStringSubmatch(err.Error()); m != nil {
+		for _, f := range c.Command.Flags {
+			if slices.Contains(f.Names(), m[1]) {
+				usageErr = fmt.Errorf("invalid or missing value for flag --%s, see --help", f.Names()[0])
+				break
+			}
+		}
+	}
+	_, _ = fmt.Fprintf(c.App.Writer, "Incorrect Usage: %v\n\n", usageErr)
+	if subcommand {
+		_ = cli.ShowSubcommandHelp(c)
+	} else {
+		_ = cli.ShowAppHelp(c)
+	}
+	return usageErr
 }
 
 type teardownable interface {
