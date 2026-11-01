@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
@@ -535,11 +534,7 @@ func (v *tailVerify) Run(ctx context.Context) error {
 
 func runVerify(c *cli.Context) error {
 	if c.Bool("pprof") {
-		go func() {
-			host := fmt.Sprintf("localhost:%d", c.Int("pprof-port"))
-			slog.Info("Starting pprof server on " + host)
-			_ = http.ListenAndServe(host, nil) // #nosec G114
-		}()
+		go servePprof(c.Int("pprof-port"))
 	}
 	slog.Info("Starting Verifier", "namespaces", c.StringSlice("namespaces"))
 	totalPartitions := c.Int("total-partitions")

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"regexp"
 	"strconv"
@@ -116,11 +117,15 @@ func getHostnameFromUrl(url string) string {
 
 var quotedURIFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
 
-func ValidateConnectionString(s string) error {
-	if _, err := connstring.ParseAndValidate(s); err != nil {
-		return errors.New(quotedURIFragment.ReplaceAllString(err.Error(), `"***"`))
+func MaskConnectionError(err error) error {
+	if err == nil {
+		return nil
 	}
-	return nil
+	msg := err.Error()
+	if pathErr, ok := errors.AsType[*fs.PathError](err); ok && pathErr.Path != "" {
+		msg = strings.ReplaceAll(msg, pathErr.Path, "***")
+	}
+	return errors.New(quotedURIFragment.ReplaceAllString(msg, `"***"`))
 }
 
 type MongoFlavor string

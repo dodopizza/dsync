@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"net/http"
-	_ "net/http/pprof" // #nosec G108
+	"net/http/pprof"
 
 	"connectrpc.com/connect"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
@@ -69,11 +69,7 @@ func runDsync(c *cli.Context) error {
 	}
 
 	if o.Pprof {
-		go func() {
-			host := fmt.Sprintf("localhost:%d", o.PprofPort)
-			slog.Info("Starting pprof server on " + host)
-			_ = http.ListenAndServe(host, nil) // #nosec G114
-		}()
+		go servePprof(int(o.PprofPort))
 	}
 
 	var needWebServer bool
@@ -354,8 +350,7 @@ func runDsync(c *cli.Context) error {
 		// This "hack" will at least ensure this does not crash out when there is more
 		// than one window open.
 		var mut sync.Mutex
-		http.Handle("/", http.StripPrefix("/", http.FileServer(http.FS(static.WebStatic))))
-		http.HandleFunc("/progress", func(w http.ResponseWriter, req *http.Request) {
+		server.Handler = progressMux(func(w http.ResponseWriter, req *http.Request) {
 			progressUpdatesHandler(runnerCtx, r, wsErrorLog, w, req, &mut)
 		})
 		wg.Add(1)
@@ -423,4 +418,26 @@ func GetMemUsageString() string {
 
 func bToMb(b uint64) uint64 {
 	return b / 1024 / 1024
+}
+
+func progressMux(progress http.HandlerFunc) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/", http.StripPrefix("/", http.FileServer(http.FS(static.WebStatic))))
+	mux.HandleFunc("/progress", progress)
+	return mux
+}
+
+func pprofMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return mux
+}
+
+func servePprof(port int) {
+	host := fmt.Sprintf("localhost:%d", port)
+	slog.Info("Starting pprof server on " + host)
+	_ = http.ListenAndServe(host, pprofMux()) // #nosec G114
 }

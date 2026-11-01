@@ -524,13 +524,10 @@ func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler 
 	var witnessMongoClient *mongo.Client
 	// Connect to the witness MongoDB instance
 	if settings.EmulateDeletes {
-		if err := mongoconn.ValidateConnectionString(settings.WitnessMongoConnString); err != nil {
-			panic(err)
-		}
 		clientOptions := moptions.Client().ApplyURI(settings.WitnessMongoConnString).SetConnectTimeout(settings.ServerConnectTimeout)
 		client, err := mongo.Connect(clientOptions)
 		if err != nil {
-			panic(err)
+			panic(mongoconn.MaskConnectionError(err))
 		}
 		witnessMongoClient = client
 	}
