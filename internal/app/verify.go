@@ -29,6 +29,7 @@ var verifyCommand *cli.Command = &cli.Command{
 	Name:         "verify",
 	Action:       runVerify,
 	OnUsageError: options.HideUsageValues,
+	Before:       options.RejectConnectionStringValues,
 	Flags: []cli.Flag{
 		&cli.DurationFlag{
 			Name:  "cooldown",

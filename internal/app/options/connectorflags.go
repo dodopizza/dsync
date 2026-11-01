@@ -58,6 +58,16 @@ func HideUsageValues(c *cli.Context, err error, subcommand bool) error {
 	return usageErr
 }
 
+func RejectConnectionStringValues(c *cli.Context) error {
+	for _, f := range c.Command.Flags {
+		name := f.Names()[0]
+		if name != "metadata" && c.IsSet(name) && strings.Contains(fmt.Sprint(c.Value(name)), "://") {
+			return fmt.Errorf("--%s value looks like a connection string, see --help", name)
+		}
+	}
+	return nil
+}
+
 type teardownable interface {
 	Teardown()
 }

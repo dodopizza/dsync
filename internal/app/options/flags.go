@@ -227,6 +227,9 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 	}
 
 	before := func(c *cli.Context) error {
+		if err := RejectConnectionStringValues(c); err != nil {
+			return err
+		}
 		if c.IsSet("progress") && !c.IsSet("logfile") {
 			return fmt.Errorf("logfile is required to display progress")
 		}

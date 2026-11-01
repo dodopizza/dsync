@@ -19,9 +19,14 @@ func TestUsageErrorsHideFlagValues(t *testing.T) {
 		usage string
 	}{
 		"root flag":       {[]string{"dsync", "--parallel-writers", uri, "mongodb://127.0.0.1:2/"}, "--parallel-writers", rootUsage},
-		"root validator":  {[]string{"dsync", "--load-level", uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "load level", ""},
+		"root validator":  {[]string{"dsync", "--load-level", uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--load-level", ""},
 		"logfile":         {[]string{"dsync", "--logfile", uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--logfile", ""},
 		"web host":        {[]string{"dsync", "--web-host", uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--web-host", ""},
+		"config":          {[]string{"dsync", "--config", uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--config", ""},
+		"namespace":       {[]string{"dsync", "--namespace", uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--namespace", ""},
+		"verify string":   {[]string{"dsync", "verify", "--namespaces", uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--namespaces", ""},
+		"serve address":   {[]string{"dsync", "serve", "--address", uri, "mongodb://127.0.0.1:1/"}, "--address", ""},
+		"serve cert":      {[]string{"dsync", "serve", "--address", "localhost:1", "--cert-file", uri, "--key-file", "k", "mongodb://127.0.0.1:1/"}, "--cert-file", ""},
 		"connector flag":  {[]string{"dsync", "mongodb://127.0.0.1:1/", "--ping-timeout", uri}, "--ping-timeout", "mongodb://connection-string [options]"},
 		"verify flag":     {[]string{"dsync", "verify", "--cooldown", uri}, "--cooldown", "verify [command options]"},
 		"serve bool flag": {[]string{"dsync", "serve", "--no-gzip=" + uri}, "--no-gzip", "serve [command options]"},
@@ -41,7 +46,7 @@ func TestUsageErrorsHideFlagValues(t *testing.T) {
 }
 
 func TestDebugLogHidesMistypedFlagValues(t *testing.T) {
-	args := []string{"dsync", "--verbosity", "DEBUG", "--namespace", "mongodb://user:PW@127.0.0.1:1/", "unknown://"}
+	args := []string{"dsync", "--verbosity", "DEBUG", "--namespace", "user:PW@127.0.0.1", "unknown://"}
 	output, err := captureOutput(t, func() error { return NewApp().Run(args) })
 	require.ErrorIs(t, err, options.ErrMissingConnector)
 	assert.Contains(t, output, "Starting dsync")

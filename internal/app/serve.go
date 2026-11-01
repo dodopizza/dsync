@@ -26,6 +26,7 @@ var serveCommand *cli.Command = &cli.Command{
 	Name:         "serve",
 	Action:       runServe,
 	OnUsageError: options.HideUsageValues,
+	Before:       options.RejectConnectionStringValues,
 	Usage:        "dsync serve --address localhost:8088 [other-options] connector [connector-options]",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
