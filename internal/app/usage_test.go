@@ -32,6 +32,12 @@ func TestUsageErrorsHideFlagValues(t *testing.T) {
 	}
 }
 
+func TestDebugLogHidesMistypedFlagValues(t *testing.T) {
+	args := []string{"dsync", "--verbosity", "DEBUG", "--namespace", "mongodb://user:PW@127.0.0.1:1/", "--logfile", "", "unknown://"}
+	output, _ := captureOutput(t, func() error { return NewApp().Run(args) })
+	assert.NotContains(t, output, "PW")
+}
+
 func captureOutput(t *testing.T, run func() error) (string, error) {
 	t.Helper()
 	r, w, err := os.Pipe()

@@ -111,8 +111,6 @@ func runDsync(c *cli.Context) error {
 
 	slog.Info(fmt.Sprintf("Starting dsync %v", build.VersionInfo()))
 
-	slog.Debug(fmt.Sprintf("Parsed options: %+v", options.RedactSensitiveInfo(o)))
-
 	var additionalSettings options.AdditionalSettings
 	if o.LoadLevel != "" {
 		additionalSettings.BaseThreadCount = runner.GetBaseThreadCount(o.LoadLevel)
