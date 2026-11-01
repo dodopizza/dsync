@@ -968,7 +968,7 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 func createReplicationUrl(urlString string) (string, error) {
 	parsed, err := url.Parse(urlString)
 	if err != nil {
-		return "", err
+		return "", errors.New("invalid postgres connection string")
 	}
 	query := parsed.Query()
 	query.Add("replication", "database")

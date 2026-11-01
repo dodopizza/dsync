@@ -6,7 +6,9 @@
 package options
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/adiom-data/dsync/internal/util"
@@ -70,6 +72,9 @@ func NewFromCLIContext(c *cli.Context) (Options, error) {
 	o.PprofPort = c.Uint("pprof-port")
 	o.WebPort = c.Uint("web-port")
 	o.WebHost = c.String("web-host")
+	if strings.ContainsAny(o.WebHost, "/@") {
+		return o, errors.New("--web-host must be a host name or IP address")
+	}
 
 	o.InitialSyncNumParallelCopiers = c.Int("parallel-copiers")
 	o.NumParallelWriters = c.Int("parallel-writers")

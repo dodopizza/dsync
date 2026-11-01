@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -88,7 +89,10 @@ func runDsync(c *cli.Context) error {
 	if o.Logfile != "" { // need to log to a file
 		logFile, err := os.OpenFile(o.Logfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
-			panic(err)
+			if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
+				err = pathErr.Err
+			}
+			return fmt.Errorf("cannot open --logfile: %w", err)
 		}
 		defer logFile.Close()
 		lo.Logfile = logFile
