@@ -33,6 +33,11 @@ import (
 
 var ErrMissingConnector = errors.New("missing or unsupported connector")
 var ErrHelp = errors.New("connector help used")
+var ErrInvalidUsage = errors.New("invalid command-line flags, see --help")
+
+func HideUsageValues(*cli.Context, error, bool) error {
+	return ErrInvalidUsage
+}
 
 type teardownable interface {
 	Teardown()
@@ -143,10 +148,11 @@ func CreateHelperWithRestArgs(name string, usage string, flags []cli.Flag, actio
 		var conn adiomv1connect.ConnectorServiceHandler
 		var restArgs []string
 		app := &cli.App{
-			HelpName:  name,
-			Usage:     "Connector",
-			UsageText: usage,
-			Flags:     flags,
+			HelpName:     name,
+			OnUsageError: HideUsageValues,
+			Usage:        "Connector",
+			UsageText:    usage,
+			Flags:        flags,
 			Action: func(c *cli.Context) error {
 				var err error
 				conn, restArgs, err = action(c, args, as)
@@ -168,10 +174,11 @@ func CreateHelper(name string, usage string, flags []cli.Flag, action func(*cli.
 		var conn adiomv1connect.ConnectorServiceHandler
 		var restArgs []string
 		app := &cli.App{
-			HelpName:  name,
-			Usage:     "Connector",
-			UsageText: usage,
-			Flags:     flags,
+			HelpName:     name,
+			OnUsageError: HideUsageValues,
+			Usage:        "Connector",
+			UsageText:    usage,
+			Flags:        flags,
 			Action: func(c *cli.Context) error {
 				var err error
 				restArgs = c.Args().Slice()
@@ -562,10 +569,11 @@ func KafkaWrap(args []string, as AdditionalSettings) (adiomv1connect.ConnectorSe
 	var conn adiomv1connect.ConnectorServiceHandler
 	var restArgs []string
 	app := &cli.App{
-		HelpName:  "kafka-wrap",
-		Usage:     "Connector",
-		UsageText: "kafka-wrap [options] [source-connector] [connector-options]",
-		Flags:     connectorsv1.KafkaSrcFlagsCommandFlags(),
+		HelpName:     "kafka-wrap",
+		OnUsageError: HideUsageValues,
+		Usage:        "Connector",
+		UsageText:    "kafka-wrap [options] [source-connector] [connector-options]",
+		Flags:        connectorsv1.KafkaSrcFlagsCommandFlags(),
 		Action: func(c *cli.Context) error {
 			restArgs = c.Args().Slice()
 			flags, err := connectorsv1.ParseKafkaSrcFlags(c)

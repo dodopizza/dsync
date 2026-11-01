@@ -23,9 +23,10 @@ import (
 )
 
 var serveCommand *cli.Command = &cli.Command{
-	Name:   "serve",
-	Action: runServe,
-	Usage:  "dsync serve --address localhost:8088 [other-options] connector [connector-options]",
+	Name:         "serve",
+	Action:       runServe,
+	OnUsageError: options.HideUsageValues,
+	Usage:        "dsync serve --address localhost:8088 [other-options] connector [connector-options]",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
 			Name:  "verbosity",

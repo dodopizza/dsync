@@ -527,7 +527,7 @@ func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler 
 		clientOptions := moptions.Client().ApplyURI(settings.WitnessMongoConnString).SetConnectTimeout(settings.ServerConnectTimeout)
 		client, err := mongo.Connect(clientOptions)
 		if err != nil {
-			panic(mongoconn.MaskConnectionError(err))
+			panic(mongoconn.InvalidClientOptionsError(clientOptions))
 		}
 		witnessMongoClient = client
 	}

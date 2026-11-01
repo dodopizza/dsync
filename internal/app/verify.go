@@ -26,8 +26,9 @@ import (
 )
 
 var verifyCommand *cli.Command = &cli.Command{
-	Name:   "verify",
-	Action: runVerify,
+	Name:         "verify",
+	Action:       runVerify,
+	OnUsageError: options.HideUsageValues,
 	Flags: []cli.Flag{
 		&cli.DurationFlag{
 			Name:  "cooldown",

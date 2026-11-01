@@ -1299,7 +1299,7 @@ func MongoClient(ctx context.Context, settings ConnectorSettings) (*mongo.Client
 	clientOptions := moptions.Client().SetAppName("dsync").ApplyURI(settings.ConnectionString).SetConnectTimeout(settings.ServerConnectTimeout)
 	client, err := mongo.Connect(clientOptions)
 	if err != nil {
-		return nil, MaskConnectionError(err)
+		return nil, InvalidClientOptionsError(clientOptions)
 	}
 
 	// Check the connection

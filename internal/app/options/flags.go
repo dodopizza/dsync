@@ -48,7 +48,7 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 			DefaultText: DefaultVerbosity,
 			Action: func(ctx *cli.Context, verbosity string) error {
 				if !slices.Contains(validVerbosities, verbosity) {
-					return fmt.Errorf("unsupported verbosity setting %v", verbosity)
+					return fmt.Errorf("unsupported verbosity setting, expected one of %s", strings.Join(validVerbosities, ","))
 				}
 				return nil
 			},
@@ -109,7 +109,7 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 			Usage: fmt.Sprintf("load level (%s). When not specified, will default to connector-specific settings", strings.Join(validLoadLevels, ",")),
 			Action: func(ctx *cli.Context, source string) error {
 				if !slices.Contains(validLoadLevels, source) {
-					return fmt.Errorf("unsupported load level setting %v", source)
+					return fmt.Errorf("unsupported load level setting, expected one of %s", strings.Join(validLoadLevels, ","))
 				}
 				return nil
 			},
@@ -121,7 +121,7 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 			Usage: fmt.Sprintf("mode of operation: %s.", strings.Join(validModes, ",")),
 			Action: func(ctx *cli.Context, source string) error {
 				if !slices.Contains(validModes, source) {
-					return fmt.Errorf("unsupported mode setting %v", source)
+					return fmt.Errorf("unsupported mode setting, expected one of %s", strings.Join(validModes, ","))
 				}
 				return nil
 			},

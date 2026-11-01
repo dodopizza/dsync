@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"regexp"
 	"strconv"
@@ -115,17 +114,11 @@ func getHostnameFromUrl(url string) string {
 	return getHostnameFromHost(host)
 }
 
-var quotedURIFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-
-func MaskConnectionError(err error) error {
-	if err == nil {
-		return nil
+func InvalidClientOptionsError(opts *options.ClientOptions) error {
+	if len(opts.Hosts) == 0 {
+		return errors.New("invalid mongo connection string")
 	}
-	msg := err.Error()
-	if pathErr, ok := errors.AsType[*fs.PathError](err); ok && pathErr.Path != "" {
-		msg = strings.ReplaceAll(msg, pathErr.Path, "***")
-	}
-	return errors.New(quotedURIFragment.ReplaceAllString(msg, `"***"`))
+	return fmt.Errorf("invalid mongo client options for %s", strings.Join(opts.Hosts, ","))
 }
 
 type MongoFlavor string

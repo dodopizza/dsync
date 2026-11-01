@@ -66,10 +66,11 @@ func ConfigureGRPCFactory(usage string, missingErr error, f func(connect.HTTPCli
 		var conn any
 		var restArgs []string
 		app := &cli.App{
-			HelpName:  "grpc",
-			Usage:     usage,
-			UsageText: "grpc://address:port [options]",
-			Flags:     connectorsv1.GrpcFlagsCommandFlags(),
+			HelpName:     "grpc",
+			OnUsageError: HideUsageValues,
+			Usage:        usage,
+			UsageText:    "grpc://address:port [options]",
+			Flags:        connectorsv1.GrpcFlagsCommandFlags(),
 			Action: func(c *cli.Context) error {
 				restArgs = c.Args().Slice()
 				flags, err := connectorsv1.ParseGrpcFlags(c)

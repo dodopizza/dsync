@@ -45,14 +45,15 @@ func NewApp() *cli.App {
 	flags, before := options.GetFlagsAndBeforeFunc()
 
 	app := &cli.App{
-		Before:    before,
-		Flags:     flags,
-		Name:      "dsync",
-		Usage:     "Copies data from the source to the destination",
-		UsageText: "dsync [options] source [source-options] destination [destination-options] [transform transform-options]",
-		Version:   build.VersionInfo(),
-		Copyright: build.CopyrightStr,
-		Action:    runDsync,
+		Before:       before,
+		Flags:        flags,
+		Name:         "dsync",
+		Usage:        "Copies data from the source to the destination",
+		UsageText:    "dsync [options] source [source-options] destination [destination-options] [transform transform-options]",
+		Version:      build.VersionInfo(),
+		Copyright:    build.CopyrightStr,
+		Action:       runDsync,
+		OnUsageError: options.HideUsageValues,
 		Commands: []*cli.Command{
 			verifyCommand,
 			serveCommand,
