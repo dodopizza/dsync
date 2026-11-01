@@ -106,13 +106,21 @@ func getHostnameFromUrl(url string) string {
 
 	connString, err := connstring.Parse(url)
 	if err != nil {
-		slog.Error(fmt.Sprintf("Failed to parse connection string: %v", err))
 		host = url //assume it's a hostname
 	} else {
 		host = connString.Hosts[0]
 	}
 
 	return getHostnameFromHost(host)
+}
+
+var quotedURIFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+func ValidateConnectionString(s string) error {
+	if _, err := connstring.ParseAndValidate(s); err != nil {
+		return errors.New(quotedURIFragment.ReplaceAllString(err.Error(), `"***"`))
+	}
+	return nil
 }
 
 type MongoFlavor string

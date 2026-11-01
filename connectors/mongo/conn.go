@@ -1294,6 +1294,9 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 func MongoClient(ctx context.Context, settings ConnectorSettings) (*mongo.Client, error) {
 	setDefault(&settings.ServerConnectTimeout, 10*time.Second)
 	setDefault(&settings.PingTimeout, 2*time.Second)
+	if err := ValidateConnectionString(settings.ConnectionString); err != nil {
+		return nil, err
+	}
 
 	// Connect to the MongoDB instance
 	clientOptions := moptions.Client().SetAppName("dsync").ApplyURI(settings.ConnectionString).SetConnectTimeout(settings.ServerConnectTimeout)

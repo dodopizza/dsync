@@ -64,6 +64,10 @@ func (s *StateStore) Setup(ctx context.Context) error {
 	reg := bson.NewRegistry()
 	reg.RegisterTypeMapEntry(bson.TypeEmbeddedDocument, tM)
 
+	if err := connectorMongo.ValidateConnectionString(s.settings.ConnectionString); err != nil {
+		return err
+	}
+
 	// Connect to the MongoDB instance
 	clientOptions := options.Client().ApplyURI(s.settings.ConnectionString).SetConnectTimeout(s.settings.serverConnectTimeout).SetRegistry(reg)
 	client, err := mongo.Connect(clientOptions)
