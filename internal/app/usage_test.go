@@ -39,7 +39,7 @@ func TestUsageErrorsHideFlagValues(t *testing.T) {
 		"userinfo host":   {[]string{"dsync", "--web-host", "user:PW@127.0.0.1", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--web-host", ""},
 		"userinfo addr":   {[]string{"dsync", "serve", "--address", "user:PW@127.0.0.1:1", "mongodb://127.0.0.1:1/"}, "--address", ""},
 		"quoted uri":      {[]string{"dsync", "--web-host", `"` + uri + `"`, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--web-host", ""},
-		"brace password":  {[]string{"dsync", "verify", "--namespaces", "src:mongodb://u:P{W@127.0.0.1/", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--namespaces", ""},
+		"brace password":  {[]string{"dsync", "verify", "--namespaces", "src:mongodb://u:PW{@127.0.0.1/", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--namespaces", ""},
 		"mapped uri":      {[]string{"dsync", "verify", "--namespaces", "src:" + uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--namespaces", ""},
 		"https config":    {[]string{"dsync", "--config", "https://user:PW@127.0.0.1:1/c.yaml", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "cannot load --config", ""},
 	} {
