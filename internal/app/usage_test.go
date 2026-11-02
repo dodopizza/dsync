@@ -38,6 +38,8 @@ func TestUsageErrorsHideFlagValues(t *testing.T) {
 		"broken yaml":     {[]string{"dsync", "--config", writeConfig(t, "web-host: [PW"), "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--config", ""},
 		"userinfo host":   {[]string{"dsync", "--web-host", "user:PW@127.0.0.1", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--web-host", ""},
 		"userinfo addr":   {[]string{"dsync", "serve", "--address", "user:PW@127.0.0.1:1", "mongodb://127.0.0.1:1/"}, "--address", ""},
+		"quoted uri":      {[]string{"dsync", "--web-host", `"` + uri + `"`, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--web-host", ""},
+		"mapped uri":      {[]string{"dsync", "verify", "--namespaces", "src:" + uri, "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--namespaces", ""},
 		"https config":    {[]string{"dsync", "--config", "https://user:PW@127.0.0.1:1/c.yaml", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "cannot load --config", ""},
 	} {
 		output, err := captureOutput(t, func() error { return NewApp().Run(tc.args) })
@@ -59,10 +61,15 @@ func TestDebugLogHidesMistypedFlagValues(t *testing.T) {
 	assert.NotContains(t, output, "PW")
 }
 
-func TestFlagValuesMayContainURLs(t *testing.T) {
-	args := []string{"dsync", "verify", "--projection", `{"https://x": 1}`, "unknown://", "unknown://"}
-	_, err := captureOutput(t, func() error { return NewApp().Run(args) })
-	require.ErrorIs(t, err, options.ErrMissingConnector)
+func TestFlagValuesMayLookLikeURLs(t *testing.T) {
+	for _, args := range [][]string{
+		{"dsync", "verify", "--projection", `{"https://x": 1}`, "unknown://", "unknown://"},
+		{"dsync", "verify", "--namespaces", "db.src:db.user@tenant", "unknown://", "unknown://"},
+		{"dsync", "--namespace", "db.src:db.user@tenant", "unknown://"},
+	} {
+		_, err := captureOutput(t, func() error { return NewApp().Run(args) })
+		require.ErrorIs(t, err, options.ErrMissingConnector, args)
+	}
 }
 
 func writeConfig(t *testing.T, content string) string {
@@ -78,15 +85,20 @@ func captureOutput(t *testing.T, run func() error) (string, error) {
 	defer r.Close()
 	stdout, stderr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = w, w
-	read := make(chan []byte, 1)
+	type result struct {
+		out []byte
+		err error
+	}
+	read := make(chan result, 1)
 	go func() {
 		out, err := io.ReadAll(r)
-		assert.NoError(t, err)
-		read <- out
+		read <- result{out, err}
 	}()
 	runErr := func() error {
 		defer func() { os.Stdout, os.Stderr = stdout, stderr; w.Close() }()
 		return run()
 	}()
-	return string(<-read), runErr
+	captured := <-read
+	require.NoError(t, captured.err)
+	return string(captured.out), runErr
 }

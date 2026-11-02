@@ -58,7 +58,10 @@ func HideUsageValues(c *cli.Context, err error, subcommand bool) error {
 	return usageErr
 }
 
-var credentialedValue = regexp.MustCompile(`^\s*(?:[A-Za-z][A-Za-z0-9+.-]*://|[\w.%+-]+:[^\s/@]*@)`)
+var (
+	uriValue      = regexp.MustCompile(`^\s*[A-Za-z][A-Za-z0-9+.-]*://|[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]*@`)
+	userinfoValue = regexp.MustCompile(`^\s*[\w.%+-]+:[^\s/@]*@`)
+)
 
 func RejectConnectionStringValues(c *cli.Context) error {
 	for _, f := range c.Command.Flags {
@@ -70,7 +73,10 @@ func RejectConnectionStringValues(c *cli.Context) error {
 		if values == nil {
 			values = []string{c.String(name)}
 		}
-		if slices.ContainsFunc(values, credentialedValue.MatchString) {
+		credentialed := func(v string) bool {
+			return uriValue.MatchString(v) || !strings.HasPrefix(name, "namespace") && userinfoValue.MatchString(v)
+		}
+		if slices.ContainsFunc(values, credentialed) {
 			return fmt.Errorf("--%s value looks like a connection string, see --help", name)
 		}
 	}
