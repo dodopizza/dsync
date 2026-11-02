@@ -59,7 +59,7 @@ func HideUsageValues(c *cli.Context, err error, subcommand bool) error {
 }
 
 var (
-	uriValue      = regexp.MustCompile(`^\s*[A-Za-z][A-Za-z0-9+.-]*://|[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]*@`)
+	uriValue      = regexp.MustCompile(`^\s*[A-Za-z][A-Za-z0-9+.-]*://|[A-Za-z][A-Za-z0-9+.-]*://[^\s/@"{}]*@`)
 	userinfoValue = regexp.MustCompile(`^\s*[\w.%+-]+:[^\s/@]*@`)
 )
 

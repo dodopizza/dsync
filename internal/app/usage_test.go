@@ -64,6 +64,7 @@ func TestDebugLogHidesMistypedFlagValues(t *testing.T) {
 func TestFlagValuesMayLookLikeURLs(t *testing.T) {
 	for _, args := range [][]string{
 		{"dsync", "verify", "--projection", `{"https://x": 1}`, "unknown://", "unknown://"},
+		{"dsync", "verify", "--projection", `{"https://x":{"owner@email":true}}`, "unknown://", "unknown://"},
 		{"dsync", "verify", "--namespaces", "db.src:db.user@tenant", "unknown://", "unknown://"},
 		{"dsync", "--namespace", "db.src:db.user@tenant", "unknown://"},
 	} {
