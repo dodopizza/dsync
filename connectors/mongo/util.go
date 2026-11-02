@@ -106,13 +106,19 @@ func getHostnameFromUrl(url string) string {
 
 	connString, err := connstring.Parse(url)
 	if err != nil {
-		slog.Error(fmt.Sprintf("Failed to parse connection string: %v", err))
 		host = url //assume it's a hostname
 	} else {
 		host = connString.Hosts[0]
 	}
 
 	return getHostnameFromHost(host)
+}
+
+func InvalidClientOptionsError(opts *options.ClientOptions) error {
+	if len(opts.Hosts) == 0 {
+		return errors.New("invalid mongo connection string")
+	}
+	return fmt.Errorf("invalid mongo client options for %s", strings.Join(opts.Hosts, ","))
 }
 
 type MongoFlavor string

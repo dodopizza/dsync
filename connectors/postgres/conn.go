@@ -183,7 +183,7 @@ func NewConn(ctx context.Context, settings PostgresSettings) (*conn, error) {
 	}
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid postgres connection string")
 	}
 	config.AfterConnect = afterConnect
 	c, err := pgxpool.NewWithConfig(ctx, config)
@@ -968,7 +968,7 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 func createReplicationUrl(urlString string) (string, error) {
 	parsed, err := url.Parse(urlString)
 	if err != nil {
-		return "", err
+		return "", errors.New("invalid postgres connection string")
 	}
 	query := parsed.Query()
 	query.Add("replication", "database")

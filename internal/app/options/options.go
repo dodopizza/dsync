@@ -52,12 +52,6 @@ type Options struct {
 	MetaRetry      util.RetryPolicy
 }
 
-// works with a copy of the struct to avoid modifying the original
-func RedactSensitiveInfo(o Options) Options {
-	o.StateStoreConnString = "REDACTED"
-	return o
-}
-
 func NewFromCLIContext(c *cli.Context) (Options, error) {
 	o := Options{}
 

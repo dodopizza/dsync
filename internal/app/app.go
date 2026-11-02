@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -20,7 +21,7 @@ import (
 	"time"
 
 	"net/http"
-	_ "net/http/pprof" // #nosec G108
+	"net/http/pprof"
 
 	"connectrpc.com/connect"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
@@ -45,14 +46,15 @@ func NewApp() *cli.App {
 	flags, before := options.GetFlagsAndBeforeFunc()
 
 	app := &cli.App{
-		Before:    before,
-		Flags:     flags,
-		Name:      "dsync",
-		Usage:     "Copies data from the source to the destination",
-		UsageText: "dsync [options] source [source-options] destination [destination-options] [transform transform-options]",
-		Version:   build.VersionInfo(),
-		Copyright: build.CopyrightStr,
-		Action:    runDsync,
+		Before:       before,
+		Flags:        flags,
+		Name:         "dsync",
+		Usage:        "Copies data from the source to the destination",
+		UsageText:    "dsync [options] source [source-options] destination [destination-options] [transform transform-options]",
+		Version:      build.VersionInfo(),
+		Copyright:    build.CopyrightStr,
+		Action:       runDsync,
+		OnUsageError: options.HideUsageValues,
 		Commands: []*cli.Command{
 			verifyCommand,
 			serveCommand,
@@ -69,11 +71,7 @@ func runDsync(c *cli.Context) error {
 	}
 
 	if o.Pprof {
-		go func() {
-			host := fmt.Sprintf("localhost:%d", o.PprofPort)
-			slog.Info("Starting pprof server on " + host)
-			_ = http.ListenAndServe(host, nil) // #nosec G114
-		}()
+		go servePprof(int(o.PprofPort))
 	}
 
 	var needWebServer bool
@@ -91,7 +89,10 @@ func runDsync(c *cli.Context) error {
 	if o.Logfile != "" { // need to log to a file
 		logFile, err := os.OpenFile(o.Logfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
-			panic(err)
+			if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
+				err = pathErr.Err
+			}
+			return fmt.Errorf("cannot open --logfile: %w", err)
 		}
 		defer logFile.Close()
 		lo.Logfile = logFile
@@ -113,8 +114,6 @@ func runDsync(c *cli.Context) error {
 	logger.Setup(lo)
 
 	slog.Info(fmt.Sprintf("Starting dsync %v", build.VersionInfo()))
-
-	slog.Debug(fmt.Sprintf("Parsed options: %+v", options.RedactSensitiveInfo(o)))
 
 	var additionalSettings options.AdditionalSettings
 	if o.LoadLevel != "" {
@@ -354,8 +353,7 @@ func runDsync(c *cli.Context) error {
 		// This "hack" will at least ensure this does not crash out when there is more
 		// than one window open.
 		var mut sync.Mutex
-		http.Handle("/", http.StripPrefix("/", http.FileServer(http.FS(static.WebStatic))))
-		http.HandleFunc("/progress", func(w http.ResponseWriter, req *http.Request) {
+		server.Handler = progressMux(func(w http.ResponseWriter, req *http.Request) {
 			progressUpdatesHandler(runnerCtx, r, wsErrorLog, w, req, &mut)
 		})
 		wg.Add(1)
@@ -423,4 +421,26 @@ func GetMemUsageString() string {
 
 func bToMb(b uint64) uint64 {
 	return b / 1024 / 1024
+}
+
+func progressMux(progress http.HandlerFunc) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/", http.StripPrefix("/", http.FileServer(http.FS(static.WebStatic))))
+	mux.HandleFunc("/progress", progress)
+	return mux
+}
+
+func pprofMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return mux
+}
+
+func servePprof(port int) {
+	host := fmt.Sprintf("localhost:%d", port)
+	slog.Info("Starting pprof server on " + host)
+	_ = http.ListenAndServe(host, pprofMux()) // #nosec G114
 }

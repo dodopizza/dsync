@@ -1299,7 +1299,7 @@ func MongoClient(ctx context.Context, settings ConnectorSettings) (*mongo.Client
 	clientOptions := moptions.Client().SetAppName("dsync").ApplyURI(settings.ConnectionString).SetConnectTimeout(settings.ServerConnectTimeout)
 	client, err := mongo.Connect(clientOptions)
 	if err != nil {
-		return nil, err
+		return nil, InvalidClientOptionsError(clientOptions)
 	}
 
 	// Check the connection
@@ -1341,7 +1341,7 @@ func NewConnWithClient(client *mongo.Client, settings ConnectorSettings) (adiomv
 	setDefault(&settings.PageBufferTTL, time.Hour)
 	query, err := stringToQuery(settings.Query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse query (%v): %w", settings.Query, err)
+		return nil, errors.New("invalid --initial-sync-query, expected Extended JSON")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &conn{

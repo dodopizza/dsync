@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/adiom-data/dsync/connectors/airbyte"
@@ -33,6 +35,56 @@ import (
 
 var ErrMissingConnector = errors.New("missing or unsupported connector")
 var ErrHelp = errors.New("connector help used")
+var ErrInvalidUsage = errors.New("invalid command-line flags, see --help")
+
+var usageErrorFlagName = regexp.MustCompile(`^(?:invalid (?:boolean )?value "(?:[^"\\]|\\.)*" for (?:flag )?-|flag needs an argument: -)([A-Za-z0-9][A-Za-z0-9_-]*)(?::|$)`)
+
+func HideUsageValues(c *cli.Context, err error, subcommand bool) error {
+	usageErr := ErrInvalidUsage
+	if m := usageErrorFlagName.FindStringSubmatch(err.Error()); m != nil {
+		for _, f := range c.Command.Flags {
+			if slices.Contains(f.Names(), m[1]) {
+				usageErr = fmt.Errorf("invalid or missing value for flag --%s, see --help", f.Names()[0])
+				break
+			}
+		}
+	}
+	_, _ = fmt.Fprintf(c.App.Writer, "Incorrect Usage: %v\n\n", usageErr)
+	if subcommand {
+		_ = cli.ShowSubcommandHelp(c)
+	} else {
+		_ = cli.ShowAppHelp(c)
+	}
+	return usageErr
+}
+
+var (
+	uriValue         = regexp.MustCompile(`^\s*[A-Za-z][A-Za-z0-9+.-]*://`)
+	embeddedURIValue = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]*@`)
+	userinfoValue    = regexp.MustCompile(`^\s*[\w.%+-]+:[^\s/@]*@`)
+)
+
+func RejectConnectionStringValues(c *cli.Context) error {
+	for _, f := range c.Command.Flags {
+		name := f.Names()[0]
+		if name == "metadata" || name == "config" {
+			continue
+		}
+		values := c.StringSlice(name)
+		if values == nil {
+			values = []string{c.String(name)}
+		}
+		credentialed := func(v string) bool {
+			return uriValue.MatchString(v) ||
+				name != "projection" && embeddedURIValue.MatchString(v) ||
+				!strings.HasPrefix(name, "namespace") && userinfoValue.MatchString(v)
+		}
+		if slices.ContainsFunc(values, credentialed) {
+			return fmt.Errorf("--%s value looks like a connection string, see --help", name)
+		}
+	}
+	return nil
+}
 
 type teardownable interface {
 	Teardown()
@@ -143,10 +195,11 @@ func CreateHelperWithRestArgs(name string, usage string, flags []cli.Flag, actio
 		var conn adiomv1connect.ConnectorServiceHandler
 		var restArgs []string
 		app := &cli.App{
-			HelpName:  name,
-			Usage:     "Connector",
-			UsageText: usage,
-			Flags:     flags,
+			HelpName:     name,
+			OnUsageError: HideUsageValues,
+			Usage:        "Connector",
+			UsageText:    usage,
+			Flags:        flags,
 			Action: func(c *cli.Context) error {
 				var err error
 				conn, restArgs, err = action(c, args, as)
@@ -168,10 +221,11 @@ func CreateHelper(name string, usage string, flags []cli.Flag, action func(*cli.
 		var conn adiomv1connect.ConnectorServiceHandler
 		var restArgs []string
 		app := &cli.App{
-			HelpName:  name,
-			Usage:     "Connector",
-			UsageText: usage,
-			Flags:     flags,
+			HelpName:     name,
+			OnUsageError: HideUsageValues,
+			Usage:        "Connector",
+			UsageText:    usage,
+			Flags:        flags,
 			Action: func(c *cli.Context) error {
 				var err error
 				restArgs = c.Args().Slice()
@@ -562,10 +616,11 @@ func KafkaWrap(args []string, as AdditionalSettings) (adiomv1connect.ConnectorSe
 	var conn adiomv1connect.ConnectorServiceHandler
 	var restArgs []string
 	app := &cli.App{
-		HelpName:  "kafka-wrap",
-		Usage:     "Connector",
-		UsageText: "kafka-wrap [options] [source-connector] [connector-options]",
-		Flags:     connectorsv1.KafkaSrcFlagsCommandFlags(),
+		HelpName:     "kafka-wrap",
+		OnUsageError: HideUsageValues,
+		Usage:        "Connector",
+		UsageText:    "kafka-wrap [options] [source-connector] [connector-options]",
+		Flags:        connectorsv1.KafkaSrcFlagsCommandFlags(),
 		Action: func(c *cli.Context) error {
 			restArgs = c.Args().Slice()
 			flags, err := connectorsv1.ParseKafkaSrcFlags(c)

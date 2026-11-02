@@ -69,7 +69,7 @@ func (s *StateStore) Setup(ctx context.Context) error {
 	client, err := mongo.Connect(clientOptions)
 	if err != nil {
 		slog.Debug("Error connecting to MongoDB instance")
-		return err
+		return connectorMongo.InvalidClientOptionsError(clientOptions)
 	}
 	s.client = client
 
