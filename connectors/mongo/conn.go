@@ -1025,6 +1025,9 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 	slog.Error(fmt.Sprintf("Failed to overwrite documents in collection: %v", replaceErr))
 	if owErr, ok := errors.AsType[mongo.BulkWriteException](replaceErr); ok {
 		for _, we := range owErr.WriteErrors[:min(10, len(owErr.WriteErrors))] {
+			if we.Index < 0 || we.Index >= len(replacements) {
+				continue
+			}
 			slog.Error(fmt.Sprintf("Overwrite failed for %v: code %d: %v", replacements[we.Index].(*mongo.ReplaceOneModel).Filter, we.Code, we.Message))
 		}
 	}

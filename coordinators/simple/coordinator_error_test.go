@@ -84,7 +84,20 @@ func (s recordingSink) WriteData(context.Context, *connect.Request[adiomv1.Write
 	return connect.NewResponse(&adiomv1.WriteDataResponse{}), nil
 }
 
-func TestStandaloneFlowFailsAfterInitialCopyWhenStreamFails(t *testing.T) {
+type lsnFailureSource struct {
+	streamFailureSource
+}
+
+func (s lsnFailureSource) StreamLSN(context.Context, *connect.Request[adiomv1.StreamLSNRequest], *connect.ServerStream[adiomv1.StreamLSNResponse]) error {
+	return connect.NewError(connect.CodeInternal, errors.New("lsn stream failed"))
+}
+
+func (s lsnFailureSource) StreamUpdates(ctx context.Context, _ *connect.Request[adiomv1.StreamUpdatesRequest], _ *connect.ServerStream[adiomv1.StreamUpdatesResponse]) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func runFlow(t *testing.T, source func(initialWritten <-chan struct{}, document []byte) adiomv1connect.ConnectorServiceHandler) (<-chan struct{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	coordinator := NewSimpleCoordinator(1)
@@ -99,13 +112,13 @@ func TestStandaloneFlowFailsAfterInitialCopyWhenStreamFails(t *testing.T) {
 		SourceDataType:      adiomv1.DataType_DATA_TYPE_MONGO_BSON,
 		DestinationDataType: adiomv1.DataType_DATA_TYPE_MONGO_BSON,
 	}
-	source := common.NewLocalConnector("source", streamFailureSource{initialWritten: initialWritten, document: document}, settings)
+	sourceConn := common.NewLocalConnector("source", source(initialWritten, document), settings)
 	sink := common.NewLocalConnector("sink", recordingSink{
 		ConnectorServiceHandler: nullconn.NewConn("sink", false, 0, 0), written: initialWritten,
 	}, settings)
-	t.Cleanup(source.Teardown)
+	t.Cleanup(sourceConn.Teardown)
 	t.Cleanup(sink.Teardown)
-	require.NoError(t, source.Setup(ctx, transport))
+	require.NoError(t, sourceConn.Setup(ctx, transport))
 	require.NoError(t, sink.Setup(ctx, transport))
 
 	var sourceID, sinkID iface.ConnectorID
@@ -121,14 +134,26 @@ func TestStandaloneFlowFailsAfterInitialCopyWhenStreamFails(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, coordinator.FlowStart(flowID))
+	return initialWritten, coordinator.WaitForFlowDone(flowID)
+}
 
+func TestStandaloneFlowFailsAfterInitialCopyWhenStreamFails(t *testing.T) {
 	// The real reader and coordinator must produce the final error without
 	// manually signaling completion. LSN is unimplemented and remains optional.
-	err = coordinator.WaitForFlowDone(flowID)
+	initialWritten, err := runFlow(t, func(initialWritten <-chan struct{}, document []byte) adiomv1connect.ConnectorServiceHandler {
+		return streamFailureSource{initialWritten: initialWritten, document: document}
+	})
 	require.ErrorContains(t, err, "source change stream failed")
 	select {
 	case <-initialWritten:
 	default:
 		t.Fatal("initial copy did not reach the sink")
 	}
+}
+
+func TestFlowFailsWhenLSNTrackingFails(t *testing.T) {
+	_, err := runFlow(t, func(initialWritten <-chan struct{}, document []byte) adiomv1connect.ConnectorServiceHandler {
+		return lsnFailureSource{streamFailureSource{initialWritten: initialWritten, document: document}}
+	})
+	require.ErrorContains(t, err, "lsn stream failed")
 }
