@@ -279,6 +279,14 @@ func (c *connector) IntegrityCheck(ctx context.Context, task iface.IntegrityChec
 	}, nil
 }
 
+func (c *connector) failLSNTracking(stage string, err error) {
+	if connect.CodeOf(err) == connect.CodeUnimplemented {
+		slog.Info(fmt.Sprintf("Connector %s does not support LSN tracking", c.id))
+		return
+	}
+	c.failFlow(stage, err)
+}
+
 func (c *connector) failFlow(stage string, err error) {
 	if c.flowCtx.Err() != nil {
 		return
@@ -588,7 +596,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			Cursor:     initialResumeToken,
 		}))
 		if err != nil {
-			c.failFlow("LSN tracker: failed to open change stream", err)
+			c.failLSNTracking("LSN tracker: failed to open change stream", err)
 			return
 		}
 		defer res.Close()
@@ -596,7 +604,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 			c.progressTracker.UpdateWriteLSN(int64(res.Msg().Lsn))
 		}
 		if res.Err() != nil {
-			c.failFlow("LSN tracker: change stream stopped", res.Err())
+			c.failLSNTracking("LSN tracker: change stream stopped", res.Err())
 		}
 	}()
 
@@ -802,23 +810,34 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 		}
 		c.progressTracker.UpdateSyncState(iface.ChangeStreamSyncState)
 
+		checkpointCtx, stopCheckpoints := context.WithCancel(c.flowCtx)
+		checkpointsDone := make(chan struct{})
 		go func() {
+			defer close(checkpointsDone)
 			ticker := time.NewTicker(c.settings.ResumeTokenUpdateInterval)
 			defer ticker.Stop()
 			for {
 				select {
-				case <-c.flowCtx.Done():
-					return
-				case <-changeStreamDone:
+				case <-checkpointCtx.Done():
 					return
 				case <-ticker.C:
 					c.resumeTokenMutex.RLock()
 					resumeToken := c.resumeToken
 					c.resumeTokenMutex.RUnlock()
 					// send a barrier message with the updated resume token
-					dataChannel <- iface.DataMessage{MutationType: iface.MutationType_Barrier, BarrierType: iface.BarrierType_CdcResumeTokenUpdate, BarrierCdcResumeToken: resumeToken}
+					select {
+					case <-checkpointCtx.Done():
+						return
+					case dataChannel <- iface.DataMessage{MutationType: iface.MutationType_Barrier, BarrierType: iface.BarrierType_CdcResumeTokenUpdate, BarrierCdcResumeToken: resumeToken}:
+					}
 				}
 			}
+		}()
+		defer func() {
+			// Join the checkpoint sender before changeStreamDone closes, so the
+			// completion routine can safely close the shared data channel.
+			stopCheckpoints()
+			<-checkpointsDone
 		}()
 
 		var lsn int64
