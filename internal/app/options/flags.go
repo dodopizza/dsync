@@ -7,6 +7,7 @@
 package options
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -227,13 +228,13 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 	}
 
 	before := func(c *cli.Context) error {
-		if err := RejectConnectionStringValues(c); err != nil {
-			return err
-		}
 		if c.IsSet("progress") && !c.IsSet("logfile") {
 			return fmt.Errorf("logfile is required to display progress")
 		}
-		return altsrc.InitInputSourceWithContext(flags, altsrc.NewYamlSourceFromFlagFunc("config"))(c)
+		if err := altsrc.InitInputSourceWithContext(flags, altsrc.NewYamlSourceFromFlagFunc("config"))(c); err != nil {
+			return errors.New("cannot load --config, see --help")
+		}
+		return RejectConnectionStringValues(c)
 	}
 	return flags, before
 }

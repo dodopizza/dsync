@@ -11,6 +11,8 @@ func TestNewConnInvalidConnectionStringErrorHidesCredentials(t *testing.T) {
 	for _, uri := range []string{
 		"postgres://user:a%PWb@127.0.0.1:1/db",
 		"postgres://user:PW@127.0.0.1:1/db?sslmode=bogus",
+		"postgres://PWuser@127.0.0.1:1/db?sslmode=bogus",
+		"postgres://user@127.0.0.1:1/db?sslmode=PWbogus",
 	} {
 		_, err := NewConn(t.Context(), PostgresSettings{URL: uri})
 		require.Error(t, err, uri)

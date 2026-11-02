@@ -183,7 +183,7 @@ func NewConn(ctx context.Context, settings PostgresSettings) (*conn, error) {
 	}
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid postgres connection string")
 	}
 	config.AfterConnect = afterConnect
 	c, err := pgxpool.NewWithConfig(ctx, config)

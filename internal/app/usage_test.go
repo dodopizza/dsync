@@ -3,6 +3,7 @@ package dsync
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/adiom-data/dsync/internal/app/options"
@@ -33,6 +34,11 @@ func TestUsageErrorsHideFlagValues(t *testing.T) {
 		"missing value":   {[]string{"dsync", "verify", "--cooldown"}, "--cooldown", "verify [command options]"},
 		"spoofed name":    {[]string{"dsync", "verify", "--cooldown", `x" for flag -limit: PW`}, "--cooldown", "verify [command options]"},
 		"unknown flag":    {[]string{"dsync", "--" + uri}, "invalid command-line flags", rootUsage},
+		"yaml value":      {[]string{"dsync", "--config", writeConfig(t, "web-host: "+uri), "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--web-host", ""},
+		"broken yaml":     {[]string{"dsync", "--config", writeConfig(t, "web-host: [PW"), "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--config", ""},
+		"userinfo host":   {[]string{"dsync", "--web-host", "user:PW@127.0.0.1", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "--web-host", ""},
+		"userinfo addr":   {[]string{"dsync", "serve", "--address", "user:PW@127.0.0.1:1", "mongodb://127.0.0.1:1/"}, "--address", ""},
+		"https config":    {[]string{"dsync", "--config", "https://user:PW@127.0.0.1:1/c.yaml", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:2/"}, "cannot load --config", ""},
 	} {
 		output, err := captureOutput(t, func() error { return NewApp().Run(tc.args) })
 		require.Error(t, err, name)
@@ -46,11 +52,23 @@ func TestUsageErrorsHideFlagValues(t *testing.T) {
 }
 
 func TestDebugLogHidesMistypedFlagValues(t *testing.T) {
-	args := []string{"dsync", "--verbosity", "DEBUG", "--namespace", "user:PW@127.0.0.1", "unknown://"}
+	args := []string{"dsync", "--verbosity", "DEBUG", "--namespace", "PW.coll", "unknown://"}
 	output, err := captureOutput(t, func() error { return NewApp().Run(args) })
 	require.ErrorIs(t, err, options.ErrMissingConnector)
 	assert.Contains(t, output, "Starting dsync")
 	assert.NotContains(t, output, "PW")
+}
+
+func TestFlagValuesMayContainURLs(t *testing.T) {
+	args := []string{"dsync", "verify", "--projection", `{"https://x": 1}`, "unknown://", "unknown://"}
+	_, err := captureOutput(t, func() error { return NewApp().Run(args) })
+	require.ErrorIs(t, err, options.ErrMissingConnector)
+}
+
+func writeConfig(t *testing.T, content string) string {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return path
 }
 
 func captureOutput(t *testing.T, run func() error) (string, error) {
@@ -60,9 +78,10 @@ func captureOutput(t *testing.T, run func() error) (string, error) {
 	defer r.Close()
 	stdout, stderr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = w, w
-	read := make(chan []byte)
+	read := make(chan []byte, 1)
 	go func() {
-		out, _ := io.ReadAll(r)
+		out, err := io.ReadAll(r)
+		assert.NoError(t, err)
 		read <- out
 	}()
 	runErr := func() error {

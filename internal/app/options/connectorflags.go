@@ -58,10 +58,19 @@ func HideUsageValues(c *cli.Context, err error, subcommand bool) error {
 	return usageErr
 }
 
+var credentialedValue = regexp.MustCompile(`^\s*(?:[A-Za-z][A-Za-z0-9+.-]*://|[\w.%+-]+:[^\s/@]*@)`)
+
 func RejectConnectionStringValues(c *cli.Context) error {
 	for _, f := range c.Command.Flags {
 		name := f.Names()[0]
-		if name != "metadata" && c.IsSet(name) && strings.Contains(fmt.Sprint(c.Value(name)), "://") {
+		if name == "metadata" || name == "config" {
+			continue
+		}
+		values := c.StringSlice(name)
+		if values == nil {
+			values = []string{c.String(name)}
+		}
+		if slices.ContainsFunc(values, credentialedValue.MatchString) {
 			return fmt.Errorf("--%s value looks like a connection string, see --help", name)
 		}
 	}

@@ -1341,7 +1341,7 @@ func NewConnWithClient(client *mongo.Client, settings ConnectorSettings) (adiomv
 	setDefault(&settings.PageBufferTTL, time.Hour)
 	query, err := stringToQuery(settings.Query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse query (%v): %w", settings.Query, err)
+		return nil, errors.New("invalid --initial-sync-query, expected Extended JSON")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &conn{

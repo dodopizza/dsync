@@ -25,3 +25,9 @@ func TestMongoClient_InvalidConnectionStringErrorHidesCredentials(t *testing.T) 
 		assert.Contains(t, err.Error(), host)
 	}
 }
+
+func TestNewConnWithClient_InvalidQueryErrorHidesValue(t *testing.T) {
+	_, err := NewConnWithClient(nil, ConnectorSettings{Query: "mongodb://user:PW@127.0.0.1:1/"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "PW")
+}
