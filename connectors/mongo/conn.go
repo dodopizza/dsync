@@ -443,7 +443,8 @@ func (c *conn) GetInfo(ctx context.Context, r *connect.Request[adiomv1.GetInfoRe
 				GetByIds:           true,
 			},
 			Sink: &adiomv1.Capabilities_Sink{
-				SupportedDataTypes: []adiomv1.DataType{adiomv1.DataType_DATA_TYPE_MONGO_BSON},
+				SupportedDataTypes:  []adiomv1.DataType{adiomv1.DataType_DATA_TYPE_MONGO_BSON},
+				PartialWriteResults: true,
 			},
 		},
 	}), nil
@@ -920,89 +921,155 @@ func streamSendErr(err error) error {
 	return connect.NewError(connect.CodeInternal, err)
 }
 
-// inserts data and overwrites on conflict
-func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []interface{}, skipBatchOverwrite bool, shardKeyFields func() ([]string, error)) error {
-	// eagerly attempt an unordered insert
-	_, bwErr := collection.InsertMany(ctx, documents, options.InsertMany().SetOrdered(false))
+type indexedDocument struct {
+	document bson.Raw
+	index    uint32
+}
 
-	// check the errors and collect those that errored out due to duplicate key errors
-	// we will skip all the other errors for now
-	if bwErr != nil {
-		var bulkOverwrite []mongo.WriteModel
+// insertBatchOverwrite inserts a batch and overwrites existing documents on
+// duplicate-key errors. When partialResults is true, errors that MongoDB ties
+// to specific operations are returned as item failures. Otherwise the first
+// such error fails the batch. Errors with ambiguous outcomes always fail the
+// batch.
+func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []indexedDocument, skipBatchOverwrite, partialResults bool, shardKeyFields func() ([]string, error)) ([]*adiomv1.ItemFailure, error) {
+	if len(documents) == 0 {
+		return nil, nil
+	}
 
-		// check if it's a bulk write exception
-		var bwErrWriteErrors mongo.BulkWriteException
-		if errors.As(bwErr, &bwErrWriteErrors) {
-			for _, we := range bwErrWriteErrors.WriteErrors {
-				if mongo.IsDuplicateKeyError(we.WriteError) {
-					if skipBatchOverwrite {
-						continue
-					}
-					fields, err := shardKeyFields()
-					if err != nil {
-						return err
-					}
-					doc := documents[we.Index].(bson.Raw)
-					filter, err := shardKeyFilter(doc, bson.D{{Key: "_id", Value: doc.Lookup("_id")}}, fields)
-					if err != nil {
-						return err
-					}
-					bulkOverwrite = append(bulkOverwrite, mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(doc).SetUpsert(true))
-				} else {
-					if slices.Contains(transientServerCodes, we.Code) {
-						slog.Warn(fmt.Sprintf("Transient failure to insert document into collection: %v", we.WriteError))
-					} else {
-						slog.Error(fmt.Sprintf("Failure to insert document into collection: %v", we.WriteError))
-					}
-					return bwErr
+	rawDocuments := make([]interface{}, len(documents))
+	for i, document := range documents {
+		rawDocuments[i] = document.document
+	}
+
+	_, insertErr := collection.InsertMany(ctx, rawDocuments, options.InsertMany().SetOrdered(false))
+	if insertErr == nil {
+		return nil, nil
+	}
+
+	var bulkErr mongo.BulkWriteException
+	if !errors.As(insertErr, &bulkErr) {
+		if isBSONObjectTooLargeError(insertErr) {
+			if len(documents) == 1 {
+				if partialResults {
+					return []*adiomv1.ItemFailure{{Index: documents[0].index, Message: insertErr.Error()}}, nil
 				}
+				return nil, insertErr
 			}
-			if bwErrWriteErrors.WriteConcernError != nil {
-				slog.Error(fmt.Sprintf("Write concern error inserting into collection: %v", bwErrWriteErrors.WriteConcernError))
-				return bwErr
-			}
-		} else {
-			// check if the error is a BSONObjectTooLarge error
-			// there could be edge cases such as all documents causing duplicate key errors and server's writeError response gets larger than 16MB
-			// we will recursively split the batch in half and try again
-			if isBSONObjectTooLargeError(bwErr) {
-				slog.Debug(fmt.Sprintf("Bulk write failed due to BSON object too large: %v", bwErr))
-				mid := len(documents) / 2
-				err := insertBatchOverwrite(ctx, collection, documents[:mid], skipBatchOverwrite, shardKeyFields)
-				if err != nil {
-					slog.Error(fmt.Sprintf("Bulk write failed (first half, up to %d): %v", mid, err))
-					return err
-				}
-				err = insertBatchOverwrite(ctx, collection, documents[mid:], skipBatchOverwrite, shardKeyFields)
-				if err != nil {
-					slog.Error(fmt.Sprintf("Bulk write failed (second half, from %d): %v", mid, err))
-					return err
-				}
-				return nil
-			}
-
-			slog.Error(fmt.Sprintf("Bulk write failed: %v", bwErr))
-			return bwErr
-		}
-
-		// maybe redo them all as a bulk replace
-		if len(bulkOverwrite) > 0 && !skipBatchOverwrite {
-			res, err := collection.BulkWrite(ctx, bulkOverwrite, options.BulkWrite().SetOrdered(false))
-			if res != nil && res.UpsertedCount > 0 {
-				slog.Error(fmt.Sprintf("Overwrite inserted %d documents instead of replacing duplicates in %v (shard key mismatch?): %v", res.UpsertedCount, collection.Name(), slices.Collect(maps.Values(res.UpsertedIDs))[:min(10, len(res.UpsertedIDs))]))
-			}
+			mid := len(documents) / 2
+			first, err := insertBatchOverwrite(ctx, collection, documents[:mid], skipBatchOverwrite, partialResults, shardKeyFields)
 			if err != nil {
-				slog.Error(fmt.Sprintf("Failed to overwrite documents in collection: %v", err))
-				if owErr, ok := errors.AsType[mongo.BulkWriteException](err); ok {
-					for _, we := range owErr.WriteErrors[:min(10, len(owErr.WriteErrors))] {
-						slog.Error(fmt.Sprintf("Overwrite failed for %v: code %d: %v", bulkOverwrite[we.Index].(*mongo.ReplaceOneModel).Filter, we.Code, we.Message))
-					}
-				}
-				return err
+				return nil, err
 			}
+			second, err := insertBatchOverwrite(ctx, collection, documents[mid:], skipBatchOverwrite, partialResults, shardKeyFields)
+			if err != nil {
+				return nil, err
+			}
+			return append(first, second...), nil
+		}
+		return nil, insertErr
+	}
+	if bulkErr.WriteConcernError != nil {
+		slog.Error(fmt.Sprintf("Write concern error inserting into collection: %v", bulkErr.WriteConcernError))
+		return nil, insertErr
+	}
+	if len(bulkErr.WriteErrors) == 0 {
+		return nil, insertErr
+	}
+
+	failures := make([]*adiomv1.ItemFailure, 0, len(bulkErr.WriteErrors))
+	replacements := make([]mongo.WriteModel, 0, len(bulkErr.WriteErrors))
+	replacementDocuments := make([]indexedDocument, 0, len(bulkErr.WriteErrors))
+	for _, writeErr := range bulkErr.WriteErrors {
+		if writeErr.Index < 0 || writeErr.Index >= len(documents) {
+			return nil, fmt.Errorf("MongoDB returned out-of-range insert error index %d for %d documents", writeErr.Index, len(documents))
+		}
+		document := documents[writeErr.Index]
+		if mongo.IsDuplicateKeyError(writeErr) {
+			if skipBatchOverwrite {
+				continue
+			}
+			fields, err := shardKeyFields()
+			if err != nil {
+				return nil, err
+			}
+			filter, err := shardKeyFilter(document.document, bson.D{{Key: "_id", Value: document.document.Lookup("_id")}}, fields)
+			if err != nil {
+				return nil, err
+			}
+			replacements = append(replacements, mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(document.document).SetUpsert(true))
+			replacementDocuments = append(replacementDocuments, document)
+			continue
+		}
+		if !partialResults {
+			if slices.Contains(transientServerCodes, writeErr.Code) {
+				slog.Warn(fmt.Sprintf("Transient failure to insert document into collection: %v", writeErr.WriteError))
+			} else {
+				slog.Error(fmt.Sprintf("Failure to insert document into collection: %v", writeErr.WriteError))
+			}
+			return nil, insertErr
+		}
+		failures = append(failures, &adiomv1.ItemFailure{Index: document.index, Message: writeErr.Error()})
+	}
+
+	if len(replacements) == 0 {
+		return failures, nil
+	}
+
+	res, replaceErr := collection.BulkWrite(ctx, replacements, options.BulkWrite().SetOrdered(false))
+	if res != nil && res.UpsertedCount > 0 {
+		slog.Error(fmt.Sprintf("Overwrite inserted %d documents instead of replacing duplicates in %v (shard key mismatch?): %v", res.UpsertedCount, collection.Name(), slices.Collect(maps.Values(res.UpsertedIDs))[:min(10, len(res.UpsertedIDs))]))
+	}
+	if replaceErr == nil {
+		return failures, nil
+	}
+	slog.Error(fmt.Sprintf("Failed to overwrite documents in collection: %v", replaceErr))
+	if owErr, ok := errors.AsType[mongo.BulkWriteException](replaceErr); ok {
+		for _, we := range owErr.WriteErrors[:min(10, len(owErr.WriteErrors))] {
+			if we.Index < 0 || we.Index >= len(replacements) {
+				continue
+			}
+			slog.Error(fmt.Sprintf("Overwrite failed for %v: code %d: %v", replacements[we.Index].(*mongo.ReplaceOneModel).Filter, we.Code, we.Message))
 		}
 	}
-	return nil
+	if !partialResults {
+		return nil, replaceErr
+	}
+	var replaceBulkErr mongo.BulkWriteException
+	if !errors.As(replaceErr, &replaceBulkErr) || replaceBulkErr.WriteConcernError != nil || len(replaceBulkErr.WriteErrors) == 0 {
+		return nil, replaceErr
+	}
+	for _, writeErr := range replaceBulkErr.WriteErrors {
+		if writeErr.Index < 0 || writeErr.Index >= len(replacementDocuments) {
+			return nil, fmt.Errorf("MongoDB returned out-of-range replacement error index %d for %d documents", writeErr.Index, len(replacementDocuments))
+		}
+		document := replacementDocuments[writeErr.Index]
+		failures = append(failures, &adiomv1.ItemFailure{Index: document.index, Message: writeErr.Error()})
+	}
+	return failures, nil
+}
+
+func normalizeWriteFailures(failures []*adiomv1.ItemFailure) []*adiomv1.ItemFailure {
+	slices.SortFunc(failures, func(a, b *adiomv1.ItemFailure) int {
+		if a.GetIndex() < b.GetIndex() {
+			return -1
+		}
+		if a.GetIndex() > b.GetIndex() {
+			return 1
+		}
+		return 0
+	})
+	if len(failures) < 2 {
+		return failures
+	}
+
+	normalized := failures[:1]
+	for _, failure := range failures[1:] {
+		if failure.GetIndex() == normalized[len(normalized)-1].GetIndex() {
+			continue
+		}
+		normalized = append(normalized, failure)
+	}
+	return normalized
 }
 
 func shardKeyFilter(doc bson.Raw, idFilter bson.D, shardKeyFields []string) (bson.D, error) {
@@ -1045,35 +1112,52 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("namespace should be fully qualified"))
 	}
+	partialResults := r.Msg.GetPartialWriteResults()
 	shardKeyFields := sync.OnceValues(func() ([]string, error) { return c.cosmosShardKeyFields(ctx, col) })
-	var batch []interface{}
-	for _, data := range r.Msg.GetData() {
+	var failures []*adiomv1.ItemFailure
+	var batch []indexedDocument
+	flush := func() error {
+		currentBatch := batch
+		batch = nil
+		batchFailures, err := insertBatchOverwrite(ctx, col, currentBatch, c.settings.SkipBatchOverwrite, partialResults, shardKeyFields)
+		if err != nil {
+			if !partialResults || ctx.Err() != nil {
+				return err
+			}
+			message := fmt.Sprintf("batch write failed: %v", err)
+			for _, document := range currentBatch {
+				failures = append(failures, &adiomv1.ItemFailure{Index: document.index, Message: message})
+			}
+			return nil
+		}
+		failures = append(failures, batchFailures...)
+		return nil
+	}
+
+	for i, data := range r.Msg.GetData() {
 		doc, err := c.cosmosValidTTL(r.Msg.GetNamespace(), bson.Raw(data), nil)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
-		batch = append(batch, doc)
+		batch = append(batch, indexedDocument{document: doc, index: uint32(i)}) // #nosec G115 -- protobuf messages cannot contain more than uint32 items
 		if c.settings.WriterMaxBatchSize > 0 && len(batch) >= c.settings.WriterMaxBatchSize {
-			err := insertBatchOverwrite(ctx, col, batch, c.settings.SkipBatchOverwrite, shardKeyFields)
-			if err != nil {
+			if err := flush(); err != nil {
 				if !errors.Is(err, context.Canceled) {
 					slog.Error(fmt.Sprintf("Failed to insert batch: %v", err))
 				}
 				return nil, maybeUnavailableError(err)
 			}
-			batch = nil
 		}
 	}
 	if len(batch) > 0 {
-		err := insertBatchOverwrite(ctx, col, batch, c.settings.SkipBatchOverwrite, shardKeyFields)
-		if err != nil {
+		if err := flush(); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				slog.Error(fmt.Sprintf("Failed to insert batch: %v", err))
 			}
 			return nil, maybeUnavailableError(err)
 		}
 	}
-	return connect.NewResponse(&adiomv1.WriteDataResponse{}), nil
+	return connect.NewResponse(&adiomv1.WriteDataResponse{Failures: normalizeWriteFailures(failures)}), nil
 }
 
 func (c *conn) buildIdFilter(update *adiomv1.Update) (bson.D, string, error) {
@@ -1169,99 +1253,177 @@ func (c *conn) cosmosValidTTL(namespace string, raw bson.Raw, idFilter bson.D) (
 	return out, nil
 }
 
-// buildBulkModels converts a sequence of updates into a slice of mongo.WriteModel
-// ready for BulkWrite, along with whether the batch must run ordered.
-//
-// Iterates updates in reverse so that per-ID dedup keeps the last (chronological) operation.
-// When the last operation for an ID is a partial update, earlier operations for the same ID
-// are kept as ordered models so they execute in sequence before the unordered batch.
-func (c *conn) buildBulkModels(namespace string, updates []*adiomv1.Update) ([]mongo.WriteModel, bool, error) {
-	var models []mongo.WriteModel
-	var orderedModels []mongo.WriteModel
+type indexedWriteModel struct {
+	model   mongo.WriteModel
+	indices []uint32
+	idKey   string
+}
 
-	seen := map[string]adiomv1.UpdateType{}
+func (c *conn) buildWriteModel(namespace string, update *adiomv1.Update) (mongo.WriteModel, string, error) {
+	idFilter, idKey, err := c.buildIdFilter(update)
+	if err != nil {
+		return nil, "", err
+	}
 
-	for i := len(updates) - 1; i >= 0; i-- {
-		update := updates[i]
-		idFilter, idKey, err := c.buildIdFilter(update)
+	switch update.GetType() {
+	case adiomv1.UpdateType_UPDATE_TYPE_INSERT, adiomv1.UpdateType_UPDATE_TYPE_UPDATE:
+		replacement, err := c.cosmosValidTTL(namespace, bson.Raw(update.GetData()), idFilter)
+		if err != nil {
+			return nil, "", err
+		}
+		return mongo.NewReplaceOneModel().SetFilter(idFilter).SetReplacement(replacement).SetUpsert(true), idKey, nil
+	case adiomv1.UpdateType_UPDATE_TYPE_DELETE:
+		return mongo.NewDeleteOneModel().SetFilter(idFilter), idKey, nil
+	case adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE:
+		theUpdate := bson.M{}
+		if update.GetData() != nil {
+			stripped, err := stripIdFields(bson.Raw(update.GetData()), idFilter)
+			if err != nil {
+				return nil, "", err
+			}
+			stripped, err = c.cosmosValidTTL(namespace, stripped, idFilter)
+			if err != nil {
+				return nil, "", err
+			}
+			if len(stripped) > 0 {
+				theUpdate["$set"] = stripped
+			}
+		}
+		if len(update.GetPartialUpdateUnset()) > 0 {
+			idKeys := make(map[string]struct{}, len(idFilter))
+			for _, e := range idFilter {
+				idKeys[e.Key] = struct{}{}
+			}
+			inner := bson.M{}
+			for _, field := range update.GetPartialUpdateUnset() {
+				if _, isID := idKeys[field]; isID {
+					continue
+				}
+				inner[field] = 1
+			}
+			if len(inner) > 0 {
+				theUpdate["$unset"] = inner
+			}
+		}
+		if len(theUpdate) == 0 {
+			return nil, idKey, nil
+		}
+		return mongo.NewUpdateOneModel().SetFilter(idFilter).SetUpdate(theUpdate).SetUpsert(true), idKey, nil
+	default:
+		return nil, idKey, nil
+	}
+}
+
+// buildIndexedBulkModels converts updates into models while retaining the
+// original request indices represented by each model.
+func (c *conn) buildIndexedBulkModels(namespace string, updates []*adiomv1.Update) ([]indexedWriteModel, bool, error) {
+	type compiledUpdate struct {
+		model mongo.WriteModel
+		idKey string
+		typ   adiomv1.UpdateType
+		index uint32
+	}
+
+	compiled := make([]compiledUpdate, 0, len(updates))
+	for i, update := range updates {
+		model, idKey, err := c.buildWriteModel(namespace, update)
 		if err != nil {
 			return nil, false, err
 		}
+		compiled = append(compiled, compiledUpdate{model: model, idKey: idKey, typ: update.GetType(), index: uint32(i)}) // #nosec G115 -- protobuf messages cannot contain more than uint32 items
+	}
 
-		lastType, found := seen[idKey]
+	var models []indexedWriteModel
+	var orderedModels []indexedWriteModel
+	seen := map[string]adiomv1.UpdateType{}
+	superseded := map[string][]uint32{}
+
+	for i := len(compiled) - 1; i >= 0; i-- {
+		update := compiled[i]
+		lastType, found := seen[update.idKey]
 		isNew := !found
 		if isNew {
-			seen[idKey] = update.GetType()
-			lastType = update.GetType()
+			seen[update.idKey] = update.typ
+			lastType = update.typ
 		}
 
-		switch update.GetType() {
-		case adiomv1.UpdateType_UPDATE_TYPE_INSERT, adiomv1.UpdateType_UPDATE_TYPE_UPDATE:
-			replacement, err := c.cosmosValidTTL(namespace, bson.Raw(update.GetData()), idFilter)
-			if err != nil {
-				return nil, false, err
-			}
-			model := mongo.NewReplaceOneModel().SetFilter(idFilter).SetReplacement(replacement).SetUpsert(true)
-			if isNew {
-				models = append(models, model)
-			} else if lastType == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
-				orderedModels = append(orderedModels, model)
-			}
-		case adiomv1.UpdateType_UPDATE_TYPE_DELETE:
-			model := mongo.NewDeleteOneModel().SetFilter(idFilter)
-			if isNew {
-				models = append(models, model)
-			} else if lastType == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
-				orderedModels = append(orderedModels, model)
-			}
-		case adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE:
-			theUpdate := bson.M{}
-			if update.GetData() != nil {
-				stripped, err := stripIdFields(bson.Raw(update.GetData()), idFilter)
-				if err != nil {
-					return nil, false, err
-				}
-				stripped, err = c.cosmosValidTTL(namespace, stripped, idFilter)
-				if err != nil {
-					return nil, false, err
-				}
-				if len(stripped) > 0 {
-					theUpdate["$set"] = stripped
-				}
-			}
-			if len(update.GetPartialUpdateUnset()) > 0 {
-				idKeys := make(map[string]struct{}, len(idFilter))
-				for _, e := range idFilter {
-					idKeys[e.Key] = struct{}{}
-				}
-				inner := bson.M{}
-				for _, field := range update.GetPartialUpdateUnset() {
-					if _, isId := idKeys[field]; isId {
-						continue
-					}
-					inner[field] = 1
-				}
-				if len(inner) > 0 {
-					theUpdate["$unset"] = inner
-				}
-			}
-			if len(theUpdate) == 0 {
-				continue
-			}
-			model := mongo.NewUpdateOneModel().SetFilter(idFilter).SetUpdate(theUpdate).SetUpsert(true)
-			if isNew {
-				models = append(models, model)
-			} else if lastType == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
-				orderedModels = append(orderedModels, model)
-			}
+		if update.model == nil {
+			continue
+		}
+		indexed := indexedWriteModel{model: update.model, indices: []uint32{update.index}, idKey: update.idKey}
+		if isNew {
+			models = append(models, indexed)
+		} else if lastType == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
+			orderedModels = append(orderedModels, indexed)
+		} else {
+			superseded[update.idKey] = append(superseded[update.idKey], update.index)
 		}
 	}
 
+	for i := range models {
+		models[i].indices = append(models[i].indices, superseded[models[i].idKey]...)
+	}
 	if len(orderedModels) > 0 {
 		slices.Reverse(orderedModels)
 		return append(orderedModels, models...), true, nil
 	}
 	return models, false, nil
+}
+
+// buildBulkModels converts a sequence of updates into a slice of mongo.WriteModel
+// ready for BulkWrite, along with whether the batch must run ordered.
+func (c *conn) buildBulkModels(namespace string, updates []*adiomv1.Update) ([]mongo.WriteModel, bool, error) {
+	indexed, ordered, err := c.buildIndexedBulkModels(namespace, updates)
+	if err != nil {
+		return nil, false, err
+	}
+	models := make([]mongo.WriteModel, len(indexed))
+	for i, model := range indexed {
+		models[i] = model.model
+	}
+	return models, ordered, nil
+}
+
+func failuresFromBulkWrite(err error, models []indexedWriteModel, ordered bool) ([]*adiomv1.ItemFailure, bool) {
+	var bulkErr mongo.BulkWriteException
+	if !errors.As(err, &bulkErr) || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
+		return nil, false
+	}
+
+	var failures []*adiomv1.ItemFailure
+	if ordered {
+		firstFailed := len(models)
+		message := err.Error()
+		for _, writeErr := range bulkErr.WriteErrors {
+			if writeErr.Index < 0 || writeErr.Index >= len(models) {
+				return nil, false
+			}
+			if writeErr.Index < firstFailed {
+				firstFailed = writeErr.Index
+				message = writeErr.Error()
+			}
+		}
+		for i := firstFailed; i < len(models); i++ {
+			failureMessage := "not attempted after an earlier ordered write failed"
+			if i == firstFailed {
+				failureMessage = message
+			}
+			for _, index := range models[i].indices {
+				failures = append(failures, &adiomv1.ItemFailure{Index: index, Message: failureMessage})
+			}
+		}
+		return failures, true
+	}
+
+	for _, writeErr := range bulkErr.WriteErrors {
+		if writeErr.Index < 0 || writeErr.Index >= len(models) {
+			return nil, false
+		}
+		for _, index := range models[writeErr.Index].indices {
+			failures = append(failures, &adiomv1.ItemFailure{Index: index, Message: writeErr.Error()})
+		}
+	}
+	return failures, true
 }
 
 // WriteUpdates implements adiomv1connect.ConnectorServiceHandler.
@@ -1270,18 +1432,26 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("namespace should be fully qualified"))
 	}
-
-	finalModels, ordered, err := c.buildBulkModels(r.Msg.GetNamespace(), r.Msg.GetUpdates())
+	indexedModels, ordered, err := c.buildIndexedBulkModels(r.Msg.GetNamespace(), r.Msg.GetUpdates())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	if len(finalModels) == 0 {
+	if len(indexedModels) == 0 {
 		return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil
 	}
 
-	_, err = col.BulkWrite(ctx, finalModels, options.BulkWrite().SetOrdered(ordered))
+	models := make([]mongo.WriteModel, len(indexedModels))
+	for i, model := range indexedModels {
+		models[i] = model.model
+	}
+	_, err = col.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(ordered))
 	if err != nil {
+		if r.Msg.GetPartialWriteResults() {
+			if failures, attributable := failuresFromBulkWrite(err, indexedModels, ordered); attributable {
+				return connect.NewResponse(&adiomv1.WriteUpdatesResponse{Failures: normalizeWriteFailures(failures)}), nil
+			}
+		}
 		if !errors.Is(err, context.Canceled) {
 			slog.Error(fmt.Sprintf("Failed to insert bulk updates: %v", err))
 		}
