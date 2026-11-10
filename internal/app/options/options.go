@@ -21,6 +21,7 @@ type Options struct {
 	Logfile string
 
 	NamespaceFrom []string
+	FlowName      string
 
 	Verify           bool
 	VerifyQuickCount bool
@@ -59,6 +60,7 @@ func NewFromCLIContext(c *cli.Context) (Options, error) {
 	o.StateStoreConnString = c.String("metadata")
 	o.Logfile = c.String("logfile")
 	o.NamespaceFrom = c.StringSlice("namespace")
+	o.FlowName = c.String("flow-name")
 	o.Verify = c.Bool("verify")
 	o.VerifyQuickCount = c.Bool("verify-quick-count")
 	o.VerifyMem = c.Bool("verify-mem")

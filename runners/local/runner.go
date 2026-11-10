@@ -58,6 +58,7 @@ type RunnerLocalSettings struct {
 	Src                  options.ConfiguredConnector
 	Dst                  options.ConfiguredConnector
 	StateStoreConnString string
+	FlowName             string
 
 	NsFromString []string
 
@@ -120,6 +121,7 @@ func NewRunnerLocal(settings RunnerLocalSettings) *RunnerLocal {
 		WriteRateLimit:            settings.WriteRateLimit,
 		ReadRetry:                 settings.ReadRetry,
 		WriteRetry:                settings.WriteRetry,
+		FlowName:                  settings.FlowName,
 	}
 	if settings.LoadLevel != "" {
 		btc := GetBaseThreadCount(settings.LoadLevel)
@@ -355,5 +357,10 @@ func applyReverseIfNeeded(settings *RunnerLocalSettings) {
 		slog.Info("Reversing the flow")
 		settings.Src, settings.Dst = settings.Dst, settings.Src
 		settings.SyncMode = iface.SyncModeCDC
+		if settings.FlowName != "" {
+			// Connection-string IDs keep the reversed flow apart from the forward one.
+			// A shared name would not, and it would resume from the forward flow's position.
+			settings.FlowName = "reverse:" + settings.FlowName
+		}
 	}
 }

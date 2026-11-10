@@ -130,6 +130,11 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 			Required:    false,
 			Category:    "Flow Options",
 		}),
+		altsrc.NewStringFlag(&cli.StringFlag{
+			Name:     "flow-name",
+			Usage:    "name the flow so its saved state survives connection string changes; never reuse one name for a different source or destination",
+			Category: "Flow Options",
+		}),
 		altsrc.NewBoolFlag(&cli.BoolFlag{
 			Name:  "pprof",
 			Usage: "enable pprof profiling on localhost:8081",

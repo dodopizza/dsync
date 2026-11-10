@@ -59,6 +59,7 @@ type ConnectorSettings struct {
 	WriteRateLimit            int
 	ReadRetry                 util.RetryPolicy
 	WriteRetry                util.RetryPolicy
+	FlowName                  string
 }
 
 type maybeOptimizedConnectorService interface {
@@ -466,12 +467,19 @@ func (c *connector) Setup(ctx context.Context, t iface.Transport) error {
 		Resumability:   true,
 	}
 
+	id := iface.ConnectorID(res.Msg.GetId())
+	if c.settings.FlowName != "" {
+		// The reported ID hashes the connection string, so a rotated password or
+		// host list would otherwise make the saved flow state unreachable.
+		id = iface.ConnectorID(c.settings.FlowName)
+	}
+
 	// Create a new connector details structure
 	connectorDetails := iface.ConnectorDetails{
 		Desc: c.desc,
 		Type: connectorType,
 		Cap:  connectorCapabilities,
-		Id:   iface.ConnectorID(res.Msg.GetId()),
+		Id:   id,
 	}
 	// Register the connector
 	c.id, err = coord.RegisterConnector(connectorDetails, c)

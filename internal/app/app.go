@@ -225,6 +225,7 @@ func runDsync(c *cli.Context) error {
 		Src:                            src,
 		Dst:                            dst,
 		StateStoreConnString:           o.StateStoreConnString,
+		FlowName:                       o.FlowName,
 		NsFromString:                   namespaces,
 		VerifyRequestedFlag:            o.Verify || o.VerifyQuickCount || o.VerifyMem,
 		VerifyQuickCountFlag:           o.VerifyQuickCount,
