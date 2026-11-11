@@ -47,6 +47,7 @@ type ConnectorSettings struct {
 	FullDocumentKey            bool
 	PageBufferTTL              time.Duration
 	CosmosSink                 bool
+	DeleteUniqueConflicts      bool
 
 	Query string // query filter, as a v2 Extended JSON string, e.g., '{\"x\":{\"$gt\":1}}'"
 }
@@ -931,7 +932,7 @@ type indexedDocument struct {
 // to specific operations are returned as item failures. Otherwise the first
 // such error fails the batch. Errors with ambiguous outcomes always fail the
 // batch.
-func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []indexedDocument, skipBatchOverwrite, partialResults bool, shardKeyFields func() ([]string, error)) ([]*adiomv1.ItemFailure, error) {
+func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, documents []indexedDocument, skipBatchOverwrite, partialResults, deleteUniqueConflicts bool, shardKeyFields func() ([]string, error)) ([]*adiomv1.ItemFailure, error) {
 	if len(documents) == 0 {
 		return nil, nil
 	}
@@ -956,11 +957,11 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 				return nil, insertErr
 			}
 			mid := len(documents) / 2
-			first, err := insertBatchOverwrite(ctx, collection, documents[:mid], skipBatchOverwrite, partialResults, shardKeyFields)
+			first, err := insertBatchOverwrite(ctx, collection, documents[:mid], skipBatchOverwrite, partialResults, deleteUniqueConflicts, shardKeyFields)
 			if err != nil {
 				return nil, err
 			}
-			second, err := insertBatchOverwrite(ctx, collection, documents[mid:], skipBatchOverwrite, partialResults, shardKeyFields)
+			second, err := insertBatchOverwrite(ctx, collection, documents[mid:], skipBatchOverwrite, partialResults, deleteUniqueConflicts, shardKeyFields)
 			if err != nil {
 				return nil, err
 			}
@@ -1018,6 +1019,9 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 	res, replaceErr := collection.BulkWrite(ctx, replacements, options.BulkWrite().SetOrdered(false))
 	if res != nil && res.UpsertedCount > 0 {
 		slog.Error(fmt.Sprintf("Overwrite inserted %d documents instead of replacing duplicates in %v (shard key mismatch?): %v", res.UpsertedCount, collection.Name(), slices.Collect(maps.Values(res.UpsertedIDs))[:min(10, len(res.UpsertedIDs))]))
+	}
+	if replaceErr != nil && deleteUniqueConflicts {
+		replaceErr = retryAfterDeletingStaleUniqueHolders(ctx, collection, replacements, false, replaceErr)
 	}
 	if replaceErr == nil {
 		return failures, nil
@@ -1119,7 +1123,7 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 	flush := func() error {
 		currentBatch := batch
 		batch = nil
-		batchFailures, err := insertBatchOverwrite(ctx, col, currentBatch, c.settings.SkipBatchOverwrite, partialResults, shardKeyFields)
+		batchFailures, err := insertBatchOverwrite(ctx, col, currentBatch, c.settings.SkipBatchOverwrite, partialResults, c.settings.DeleteUniqueConflicts, shardKeyFields)
 		if err != nil {
 			if !partialResults || ctx.Err() != nil {
 				return err
@@ -1426,6 +1430,160 @@ func failuresFromBulkWrite(err error, models []indexedWriteModel, ordered bool) 
 	return failures, true
 }
 
+type uniqueConflict struct {
+	position     int
+	newID        any
+	keyPattern   bson.Raw
+	holderFilter bson.D
+	indexName    string
+}
+
+// retryAfterDeletingStaleUniqueHolders handles a bulk write that failed only
+// because other destination documents hold unique key values its documents
+// need. The source enforces the same unique index, so it no longer has those
+// documents: each one is deleted and the failed writes run once more. Any
+// other failure is returned unchanged, and a failed retry is returned with its
+// write error indexes pointing into models.
+func retryAfterDeletingStaleUniqueHolders(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, writeErr error) error {
+	bulkErr, ok := errors.AsType[mongo.BulkWriteException](writeErr)
+	if !ok || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
+		return writeErr
+	}
+	conflicts := make([]uniqueConflict, 0, len(bulkErr.WriteErrors))
+	for _, we := range bulkErr.WriteErrors {
+		conflict, ok := uniqueConflictFrom(we, models)
+		if !ok {
+			return writeErr
+		}
+		conflicts = append(conflicts, conflict)
+	}
+	ns := col.Database().Name() + "." + col.Name()
+	indexNames, err := plainUniqueIndexNames(ctx, col)
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to list indexes of %v to resolve a unique index conflict: %v", ns, err))
+		return writeErr
+	}
+	for i := range conflicts {
+		if conflicts[i].indexName, ok = indexNames[string(conflicts[i].keyPattern)]; !ok {
+			return writeErr
+		}
+	}
+
+	positions := make([]int, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		projection := options.FindOneAndDelete().SetProjection(bson.D{{Key: "_id", Value: 1}})
+		deleted, err := col.FindOneAndDelete(ctx, conflict.holderFilter, projection).Raw()
+		if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+			slog.Error(fmt.Sprintf("Failed to delete the stale document holding unique index %v in %v: %v", conflict.indexName, ns, err))
+			return writeErr
+		}
+		if err == nil {
+			slog.Warn(fmt.Sprintf("Deleted stale document %v from %v to resolve a conflict on unique index %v with document %v", deleted.Lookup("_id"), ns, conflict.indexName, conflict.newID))
+		}
+		positions = append(positions, conflict.position)
+	}
+	slices.Sort(positions)
+	positions = slices.Compact(positions)
+	if ordered {
+		// An ordered batch stopped at its first failure, so the writes after it never ran.
+		for position := positions[0] + 1; position < len(models); position++ {
+			positions = append(positions, position)
+		}
+		positions = slices.Compact(positions)
+	}
+	retry := make([]mongo.WriteModel, len(positions))
+	for i, position := range positions {
+		retry[i] = models[position]
+	}
+	_, retryErr := col.BulkWrite(ctx, retry, options.BulkWrite().SetOrdered(ordered))
+	retryBulkErr, ok := errors.AsType[mongo.BulkWriteException](retryErr)
+	if !ok {
+		return retryErr
+	}
+	for i, we := range retryBulkErr.WriteErrors {
+		if we.Index >= 0 && we.Index < len(positions) {
+			retryBulkErr.WriteErrors[i].Index = positions[we.Index]
+		}
+	}
+	return retryBulkErr
+}
+
+func uniqueConflictFrom(we mongo.BulkWriteError, models []mongo.WriteModel) (uniqueConflict, bool) {
+	if !mongo.IsDuplicateKeyError(we) || we.Index < 0 || we.Index >= len(models) {
+		return uniqueConflict{}, false
+	}
+	keyPattern, ok := we.Raw.Lookup("keyPattern").DocumentOK()
+	if !ok {
+		return uniqueConflict{}, false
+	}
+	if _, err := keyPattern.LookupErr("_id"); err == nil {
+		return uniqueConflict{}, false
+	}
+	// With a collation the server reports a collation key, not a value a filter can match.
+	if _, err := we.Raw.LookupErr("collation"); err == nil {
+		return uniqueConflict{}, false
+	}
+	keyValue, ok := we.Raw.Lookup("keyValue").DocumentOK()
+	if !ok {
+		return uniqueConflict{}, false
+	}
+	keyElements, err := keyValue.Elements()
+	if err != nil || len(keyElements) == 0 {
+		return uniqueConflict{}, false
+	}
+	var filter any
+	switch model := models[we.Index].(type) {
+	case *mongo.ReplaceOneModel:
+		filter = model.Filter
+	case *mongo.UpdateOneModel:
+		filter = model.Filter
+	}
+	idFilter, _ := filter.(bson.D)
+	idIndex := slices.IndexFunc(idFilter, func(e bson.E) bool { return e.Key == "_id" })
+	if idIndex < 0 {
+		return uniqueConflict{}, false
+	}
+	newID := idFilter[idIndex].Value
+	holderFilter := bson.D{{Key: "_id", Value: bson.D{{Key: "$ne", Value: newID}}}}
+	for _, element := range keyElements {
+		holderFilter = append(holderFilter, bson.E{Key: element.Key(), Value: element.Value()})
+	}
+	return uniqueConflict{position: we.Index, newID: newID, keyPattern: keyPattern, holderFilter: holderFilter}, true
+}
+
+// plainUniqueIndexNames maps the key pattern of each unique index to its name,
+// leaving out partial and collated indexes: a filter by key value could match
+// a document such an index does not hold.
+func plainUniqueIndexNames(ctx context.Context, col *mongo.Collection) (map[string]string, error) {
+	cursor, err := col.Indexes().List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var indexes []struct {
+		Name      string   `bson:"name"`
+		Key       bson.Raw `bson:"key"`
+		Unique    bool     `bson:"unique"`
+		Partial   bson.Raw `bson:"partialFilterExpression"`
+		Collation bson.Raw `bson:"collation"`
+	}
+	if err := cursor.All(ctx, &indexes); err != nil {
+		return nil, err
+	}
+	names := map[string]string{}
+	var excluded []string
+	for _, index := range indexes {
+		if index.Unique && len(index.Partial) == 0 && len(index.Collation) == 0 {
+			names[string(index.Key)] = index.Name
+		} else {
+			excluded = append(excluded, string(index.Key))
+		}
+	}
+	for _, key := range excluded {
+		delete(names, key)
+	}
+	return names, nil
+}
+
 // WriteUpdates implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.WriteUpdatesRequest]) (*connect.Response[adiomv1.WriteUpdatesResponse], error) {
 	col, _, ok := GetCol(c.client, r.Msg.GetNamespace())
@@ -1446,6 +1604,9 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		models[i] = model.model
 	}
 	_, err = col.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(ordered))
+	if err != nil && c.settings.DeleteUniqueConflicts {
+		err = retryAfterDeletingStaleUniqueHolders(ctx, col, models, ordered, err)
+	}
 	if err != nil {
 		if r.Msg.GetPartialWriteResults() {
 			if failures, attributable := failuresFromBulkWrite(err, indexedModels, ordered); attributable {

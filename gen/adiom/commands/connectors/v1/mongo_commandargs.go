@@ -140,6 +140,10 @@ func MongoFlagsCommandFlags() []cli.Flag {
 			Value:  100,
 			Hidden: true,
 		},
+		&cli.BoolFlag{
+			Name:  "delete-unique-conflicts",
+			Usage: "when writing: on a duplicate key in a unique index other than _id, delete the document holding the key and retry once; requires the same unique index on the source",
+		},
 	}
 }
 
@@ -159,6 +163,7 @@ func ParseMongoFlags(c *cli.Context) (*MongoFlags, error) {
 	cfg.SampleFactor = int32(c.Int("sample-factor"))
 	cfg.PerNamespaceStreams = c.Bool("per-namespace-streams")
 	cfg.DocumentdbSamplingFanout = int32(c.Int("documentdb-sampling-fanout"))
+	cfg.DeleteUniqueConflicts = c.Bool("delete-unique-conflicts")
 	return cfg, nil
 }
 

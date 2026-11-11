@@ -72,4 +72,8 @@ message MongoFlags {
     default: "100"
     hidden: true
   }];
+  bool delete_unique_conflicts = 5 [(commandargs.v1.flag) = {
+    name: "delete-unique-conflicts"
+    usage: "when writing: on a duplicate key in a unique index other than _id, delete the document holding the key and retry once; requires the same unique index on the source"
+  }];
 }
