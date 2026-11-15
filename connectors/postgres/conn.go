@@ -704,6 +704,24 @@ func buildUpsertQuery(namespace string, pkeys []string, columns []string) string
 	)
 }
 
+func (c *conn) execBatch(ctx context.Context, batch *pgx.Batch, onFail func(i int, err error)) error {
+	br := c.c.SendBatch(ctx, batch)
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			onFail(i, err)
+			_ = br.Close()
+			return toConnectError(err)
+		}
+	}
+	if err := br.Close(); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			slog.Error(fmt.Sprintf("Failed to commit batch: %v", err))
+		}
+		return toConnectError(err)
+	}
+	return nil
+}
+
 // WriteData implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDataRequest]) (*connect.Response[adiomv1.WriteDataResponse], error) {
 	namespace := r.Msg.GetNamespace()
@@ -761,22 +779,16 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 		batch.Queue(query, values...)
 	}
 
-	// Execute batch
-	br := c.c.SendBatch(ctx, batch)
-	defer br.Close()
-
-	// Process results
-	for i := 0; i < len(documents); i++ {
-		_, err := br.Exec()
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				slog.Error(fmt.Sprintf("Failed to insert document %d: %v", i, err))
-				for key, value := range documents[i] {
-					slog.Debug("Document field", "key", key, "value", value, "type", fmt.Sprintf("%T", value))
-				}
+	err := c.execBatch(ctx, batch, func(i int, err error) {
+		if !errors.Is(err, context.Canceled) {
+			slog.Error(fmt.Sprintf("Failed to insert document %d: %v", i, err))
+			for key, value := range documents[i] {
+				slog.Debug("Document field", "key", key, "value", value, "type", fmt.Sprintf("%T", value))
 			}
-			return nil, connect.NewError(connect.CodeInternal, err)
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return connect.NewResponse(&adiomv1.WriteDataResponse{}), nil
@@ -939,27 +951,21 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		}
 	}
 
-	// Execute batch
-	br := c.c.SendBatch(ctx, batch)
-	defer br.Close()
-
-	// Process results
-	for i := 0; i < len(operations); i++ {
-		_, err := br.Exec()
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				slog.Error(fmt.Sprintf("Failed to execute update %d: %v", i, err))
-				if operations[i].isDelete {
-					slog.Debug("Failed delete operation", "pkValues", operations[i].pkValues)
-				} else {
-					slog.Debug("Failed insert/update operation")
-					for key, value := range operations[i].data {
-						slog.Debug("Operation field", "key", key, "value", value, "type", fmt.Sprintf("%T", value))
-					}
+	err := c.execBatch(ctx, batch, func(i int, err error) {
+		if !errors.Is(err, context.Canceled) {
+			slog.Error(fmt.Sprintf("Failed to execute update %d: %v", i, err))
+			if operations[i].isDelete {
+				slog.Debug("Failed delete operation", "pkValues", operations[i].pkValues)
+			} else {
+				slog.Debug("Failed insert/update operation")
+				for key, value := range operations[i].data {
+					slog.Debug("Operation field", "key", key, "value", value, "type", fmt.Sprintf("%T", value))
 				}
 			}
-			return nil, connect.NewError(connect.CodeInternal, err)
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil

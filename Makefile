@@ -1,4 +1,4 @@
-.PHONY: dsync clean clean-dbs verify bootstrap1 bootstrap2 sync12 test-all test clean-testdb test-mongo test-cosmos mocks
+.PHONY: dsync clean clean-dbs verify bootstrap1 bootstrap2 sync12 test-all test clean-testdb test-mongo test-postgres test-cosmos mocks
 
 RUN_CMD=go run main.go
 
@@ -46,6 +46,10 @@ clean-testdb:
 
 test-mongo:
 	MONGO_TEST=mongodb://mongotest:27019/?replicaSet=datatest go test -count=1 -v --tags=external github.com/adiom-data/dsync/connectors/mongo
+
+test-postgres:
+	@test -n "$$POSTGRES_TEST" || { echo 'Set POSTGRES_TEST to a PostgreSQL DSN (LOGIN, CONNECT and CREATE on the database is enough)'; exit 1; }
+	go test -count=1 -v --tags=external github.com/adiom-data/dsync/connectors/postgres
 
 test-dynamodb:
 	echo 'Ensure that localstack is running'
