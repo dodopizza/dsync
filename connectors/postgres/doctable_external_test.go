@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -178,4 +179,18 @@ func TestLoadDocTableIgnoresIncludeColumnsInThePrimaryKey(t *testing.T) {
 	assert.Equal(t, []string{"id"}, got.PrimaryKey)
 	require.Error(t, rejected)
 	assert.Contains(t, rejected.Error(), "primary key must include column id")
+}
+
+func TestLoadDocTableRejectsDeferrablePrimaryKeyNamingTheTable(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, "CREATE TABLE %s.deferred (id text, doc jsonb, PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED)", f.schema)
+	f.exec(ctx, t, "CREATE TABLE %s.deferrable (id text, doc jsonb, PRIMARY KEY (id) DEFERRABLE)", f.schema)
+
+	for _, table := range []string{"deferred", "deferrable"} {
+		_, err := loadDocTable(ctx, f.pool, f.schema+"."+table)
+		require.Error(t, err, table)
+		assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+		assert.Contains(t, err.Error(), f.schema+"."+table)
+	}
 }

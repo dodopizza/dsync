@@ -104,3 +104,17 @@ func TestLoadDocTableRejectsNonTwoPartNamespacesBeforeQuerying(t *testing.T) {
 		})
 	}
 }
+
+func TestShapeDocTableRejectsDeferrablePrimaryKeyNamingTable(t *testing.T) {
+	columns := []catalogColumn{
+		{Name: "id", Type: "text", KeyOrder: 1, Deferrable: true},
+		{Name: "doc", Type: "jsonb", Deferrable: true},
+	}
+
+	_, err := shapeDocTable("app.items", columns, []string{"id"})
+
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	assert.Contains(t, err.Error(), "app.items")
+	assert.Contains(t, err.Error(), "deferred")
+}

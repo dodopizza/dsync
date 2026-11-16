@@ -46,6 +46,10 @@ type PostgresSettings struct {
 	// When true, sets session_replication_role = 'replica' for sink operations
 	// This disables triggers and rules, useful when replicating data
 	EnableReplicaMode bool
+
+	DocumentMode    bool
+	UpdatedAtColumn string
+	UpdatedAtField  string
 }
 
 type conn struct {
@@ -57,6 +61,9 @@ type conn struct {
 	pkeys        map[string][]string
 	settings     PostgresSettings
 	bsonRegistry *bson.Registry
+
+	docs docState
+	now  func() time.Time
 }
 
 func (c *conn) Teardown() {
@@ -712,6 +719,14 @@ func buildUpsertQuery(namespace string, pkeys []string, columns []string) string
 }
 
 func (c *conn) execBatch(ctx context.Context, batch *pgx.Batch, onFail func(i int, err error)) error {
+	return c.execBatchWith(ctx, batch, onFail, func(err error) {
+		if !errors.Is(err, context.Canceled) {
+			slog.Error(fmt.Sprintf("Failed to complete batch: %v", err))
+		}
+	})
+}
+
+func (c *conn) execBatchWith(ctx context.Context, batch *pgx.Batch, onFail func(i int, err error), onCloseFail func(err error)) error {
 	br := c.c.SendBatch(ctx, batch)
 	for i := range batch.Len() {
 		if _, err := br.Exec(); err != nil {
@@ -721,9 +736,7 @@ func (c *conn) execBatch(ctx context.Context, batch *pgx.Batch, onFail func(i in
 		}
 	}
 	if err := br.Close(); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			slog.Error(fmt.Sprintf("Failed to complete batch: %v", err))
-		}
+		onCloseFail(err)
 		return toConnectError(err)
 	}
 	return nil
@@ -732,6 +745,12 @@ func (c *conn) execBatch(ctx context.Context, batch *pgx.Batch, onFail func(i in
 // WriteData implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDataRequest]) (*connect.Response[adiomv1.WriteDataResponse], error) {
 	namespace := r.Msg.GetNamespace()
+	if c.settings.DocumentMode {
+		if err := c.writeDocuments(ctx, namespace, r.Msg.GetData()); err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(&adiomv1.WriteDataResponse{}), nil
+	}
 	pkeys := c.pkeys[namespace]
 	if len(pkeys) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("no primary key found for namespace %s", namespace))

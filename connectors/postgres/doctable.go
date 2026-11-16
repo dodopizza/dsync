@@ -16,9 +16,11 @@ const (
 	docDocColumn   = "doc"
 	identityAlways = "a"
 	docColumnsSQL  = `SELECT a.attname, pg_catalog.format_type(a.atttypid, NULL), a.attgenerated <> '', a.attidentity::text,
-	CASE WHEN array_position(i.indkey::int2[], a.attnum) < i.indnkeyatts THEN array_position(i.indkey::int2[], a.attnum) + 1 ELSE 0 END::int
+	CASE WHEN array_position(i.indkey::int2[], a.attnum) < i.indnkeyatts THEN array_position(i.indkey::int2[], a.attnum) + 1 ELSE 0 END::int,
+	COALESCE(NOT i.indimmediate, false), COALESCE(con.conname, '')
 FROM pg_catalog.pg_attribute a
 LEFT JOIN pg_catalog.pg_index i ON i.indrelid = a.attrelid AND i.indisprimary
+LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid AND con.contype = 'p'
 WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum`
 )
@@ -31,14 +33,17 @@ type docColumn struct {
 type docTable struct {
 	Columns    []docColumn
 	PrimaryKey []string
+	Constraint string
 }
 
 type catalogColumn struct {
-	Name      string
-	Type      string
-	Generated bool
-	Identity  string
-	KeyOrder  int
+	Name       string
+	Type       string
+	Generated  bool
+	Identity   string
+	KeyOrder   int
+	Deferrable bool
+	Constraint string
 }
 
 func (c catalogColumn) unwritable() bool {
@@ -67,13 +72,16 @@ func shapeDocTable(namespace string, columns []catalogColumn, primaryKey []strin
 	if !slices.Contains(primaryKey, docIDColumn) {
 		return docTable{}, shapeError(namespace, "primary key must include column %s", docIDColumn)
 	}
+	if slices.ContainsFunc(columns, func(c catalogColumn) bool { return c.KeyOrder > 0 && c.Deferrable }) {
+		return docTable{}, shapeError(namespace, "primary key must not be deferred")
+	}
 	var selected []docColumn
 	for _, c := range columns {
 		if c.Name != docIDColumn && c.Name != docDocColumn && !c.unwritable() {
 			selected = append(selected, docColumn{Name: c.Name, Type: c.Type})
 		}
 	}
-	return docTable{Columns: selected, PrimaryKey: primaryKey}, nil
+	return docTable{Columns: selected, PrimaryKey: primaryKey, Constraint: constraintOf(columns)}, nil
 }
 
 func loadDocTable(ctx context.Context, c *pgxpool.Pool, namespace string) (docTable, error) {
@@ -86,7 +94,7 @@ func loadDocTable(ctx context.Context, c *pgxpool.Pool, namespace string) (docTa
 	}
 	columns, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (catalogColumn, error) {
 		var col catalogColumn
-		err := row.Scan(&col.Name, &col.Type, &col.Generated, &col.Identity, &col.KeyOrder)
+		err := row.Scan(&col.Name, &col.Type, &col.Generated, &col.Identity, &col.KeyOrder, &col.Deferrable, &col.Constraint)
 		return col, err
 	})
 	if err != nil {
@@ -96,6 +104,15 @@ func loadDocTable(ctx context.Context, c *pgxpool.Pool, namespace string) (docTa
 		return docTable{}, shapeError(namespace, "does not exist")
 	}
 	return shapeDocTable(namespace, columns, primaryKeyOf(columns))
+}
+
+func constraintOf(columns []catalogColumn) string {
+	for _, c := range columns {
+		if c.KeyOrder > 0 {
+			return c.Constraint
+		}
+	}
+	return ""
 }
 
 func primaryKeyOf(columns []catalogColumn) []string {
