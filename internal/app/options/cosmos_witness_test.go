@@ -155,3 +155,12 @@ func TestCosmosWitnessIsNotReportedInUseWhenTheEnvVarIsIgnored(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, used)
 }
+
+func TestCosmosWitnessEnvWithReverseIsAUsageErrorEvenInTheDestinationPosition(t *testing.T) {
+	t.Setenv(witnessEnv, witnessDSN)
+
+	_, err := cosmosSettings(t, AdditionalSettings{Reverse: true, Destination: true})
+
+	require.ErrorIs(t, err, ErrInvalidUsage)
+	require.ErrorContains(t, err, "--reverse")
+}

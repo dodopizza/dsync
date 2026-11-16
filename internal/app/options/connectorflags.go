@@ -847,7 +847,7 @@ func cosmosSettingsFromFlags(f *connectorsv1.CosmosFlags, connString string, as 
 		s.EmulateDeletes = true
 		s.WitnessMongoConnString = f.CosmosDeletesCdc
 	}
-	if dsn := os.Getenv(cosmosWitnessPostgresEnv); dsn != "" && !as.Destination {
+	if dsn := os.Getenv(cosmosWitnessPostgresEnv); dsn != "" && (!as.Destination || as.Reverse) {
 		if err := useCosmosPostgresWitness(&s, dsn, as); err != nil {
 			return s, err
 		}
