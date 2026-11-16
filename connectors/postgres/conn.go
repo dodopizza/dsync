@@ -708,7 +708,7 @@ func buildUpsertQuery(namespace string, pkeys []string, columns []string) string
 
 func (c *conn) execBatch(ctx context.Context, batch *pgx.Batch, onFail func(i int, err error)) error {
 	br := c.c.SendBatch(ctx, batch)
-	for i := 0; i < batch.Len(); i++ {
+	for i := range batch.Len() {
 		if _, err := br.Exec(); err != nil {
 			onFail(i, err)
 			_ = br.Close()

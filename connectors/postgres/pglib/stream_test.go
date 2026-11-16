@@ -29,7 +29,7 @@ func TestRunErrorsHideConnectionString(t *testing.T) {
 		"closed port":    "postgres://u:" + password + "@127.0.0.1:1/d?sslmode=disable&replication=database",
 	} {
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 
 			err := (&ChangeStream{ReplicationURL: url, ReplicationSlotName: "s", PublicationName: "p"}).Run(ctx, make(chan []Update, 1))

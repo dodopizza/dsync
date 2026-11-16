@@ -41,7 +41,7 @@ func TestNewConnErrorsHideConnectionString(t *testing.T) {
 	for name, url := range map[string]string{"malformed": malformedURL, "closed port": closedPortURL, "query password": queryPassword, "query password malformed": queryMalformed} {
 		t.Run(name, func(t *testing.T) {
 			logs := captureLogs(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 
 			_, err := NewConn(ctx, PostgresSettings{URL: url, SlotName: "dsync_slot"})
@@ -67,7 +67,7 @@ func TestCreateReplicationUrlAcceptsOnlyPostgresSchemes(t *testing.T) {
 func TestNewConnRejectsKeywordValueString(t *testing.T) {
 	logs := captureLogs(t)
 
-	_, err := NewConn(context.Background(), PostgresSettings{URL: keywordValue, SlotName: "dsync_slot"})
+	_, err := NewConn(t.Context(), PostgresSettings{URL: keywordValue, SlotName: "dsync_slot"})
 
 	assert.EqualError(t, err, "invalid postgres connection string")
 	assertNoSecrets(t, keywordValue, logs.String())
@@ -82,7 +82,7 @@ func TestNewConnRejectsInvalidSlotName(t *testing.T) {
 		"too long":      strings.Repeat("a", 64),
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewConn(context.Background(), PostgresSettings{URL: closedPortURL, SlotName: slot})
+			_, err := NewConn(t.Context(), PostgresSettings{URL: closedPortURL, SlotName: slot})
 
 			var connectErr *connect.Error
 			require.ErrorAs(t, err, &connectErr)
