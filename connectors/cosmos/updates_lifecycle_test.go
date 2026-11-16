@@ -67,8 +67,7 @@ func TestStreamUpdatesDoesNotReturnWhileADeleteSendIsInFlight(t *testing.T) {
 	release := make(chan struct{})
 	var returned atomic.Bool
 	var lateSend atomic.Bool
-	var releaseOnce sync.Once
-	releaseSend := func() { releaseOnce.Do(func() { close(release) }) }
+	releaseSend := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseSend)
 	send := func(*adiomv1.StreamUpdatesResponse) error {
 		close(entered)

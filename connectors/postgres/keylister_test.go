@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -269,7 +268,7 @@ func TestEmitKeyPagesFailsOnAnUndecodableRow(t *testing.T) {
 func TestNewKeyListerRejectsAMalformedConnectionStringWithoutEchoingIt(t *testing.T) {
 	const secret = "s3cr3t-marker"
 
-	lister, err := NewKeyLister(context.Background(), "postgres://u:"+secret+"@host:notaport/db", nil)
+	lister, err := NewKeyLister(t.Context(), "postgres://u:"+secret+"@host:notaport/db", nil)
 
 	require.Nil(t, lister)
 	require.EqualError(t, err, "invalid postgres connection string")

@@ -619,9 +619,7 @@ func (u updatesRun) run(ctx context.Context) error {
 	}
 	var deletes sync.WaitGroup
 	if u.checkDeletes != nil {
-		deletes.Add(1)
-		go func() {
-			defer deletes.Done()
+		deletes.Go(func() {
 			ticker := time.NewTicker(u.deletesInterval)
 			defer ticker.Stop()
 			runDelete := func() {
@@ -660,7 +658,7 @@ func (u updatesRun) run(ctx context.Context) error {
 					runDelete()
 				}
 			}
-		}()
+		})
 	}
 	var wg sync.WaitGroup
 	for _, ns := range u.namespaces {

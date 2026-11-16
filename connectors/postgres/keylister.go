@@ -107,7 +107,7 @@ func keyTuple(idText, keyText string, fieldCount int) ([]bson.RawValue, error) {
 		return nil, err
 	}
 	tuple := []bson.RawValue{{Type: id.Type, Value: slices.Clone(id.Value)}}
-	for i := 0; i < fieldCount; i++ {
+	for i := range fieldCount {
 		rv, err := raw.LookupErr(fmt.Sprintf("k%d", i))
 		if err != nil || rv.Type == bson.TypeNull {
 			tuple = append(tuple, bson.RawValue{Type: bson.TypeNull})
