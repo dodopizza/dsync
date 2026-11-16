@@ -309,6 +309,7 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 		}
 	}
 	lsnTracker := NewMultiNsLSNTracker()
+	deletesBase := c.deletesCount.Load()
 	for _, namespace := range namespaces {
 		ns := iface.Namespace{Db: namespace.Db, Col: namespace.Col}
 		wg.Add(1)
@@ -333,7 +334,7 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 				if changeStream.RemainingBatchLength() == 0 {
 					err := sendWithCursor(sender, tokenMap, readPlanStartAt, loc, changeStream.ResumeToken(), func(cursor []byte) error {
 						return s.Send(&adiomv1.StreamLSNResponse{
-							Lsn:        uint64(lsnTracker.GetGlobalLSN()) + c.deletesCount.Load(),
+							Lsn:        lsnWithDeletes(lsnTracker.GetGlobalLSN(), &c.deletesCount, deletesBase),
 							NextCursor: cursor,
 						})
 					})
@@ -446,23 +447,6 @@ func shardKeyIdPart(change mongoconn.MongoUpdate, field string) (*adiomv1.BsonVa
 	return nil, fmt.Errorf("shard key field %v is in neither fullDocument nor documentKey", field)
 }
 
-func checkForDeletes(ctx context.Context, client *mongo.Client, witnessClient *mongo.Client, namespaces []iface.Namespace) (map[iface.Location][]*adiomv1.Update, error) {
-	// Preparations
-	mismatchedNamespaces := make(chan iface.Namespace)
-	idsToCheck := make(chan idsWithLocation)  //channel to post ids to check
-	idsToDelete := make(chan idsWithLocation) //channel to post ids to delete
-
-	// 1. Compare the doc count on both sides (asynchoronously so that we can proceed with the next steps here)
-	go compareDocCountWithWitness(ctx, client, witnessClient, namespaces, mismatchedNamespaces)
-
-	// 2. For mismatches, use Witness index to find out what has been deleted (async so that we can proceed with the next steps here)
-	go parallelScanWitnessNamespaces(ctx, witnessClient, mismatchedNamespaces, idsToCheck)
-	go checkSourceIdsAndGenerateDeletes(ctx, client, idsToCheck, idsToDelete)
-
-	// 3. Generate delete events
-	return deleteUpdatesFromIDs(idsToDelete)
-}
-
 func deleteUpdatesFromIDs(idsToDelete <-chan idsWithLocation) (map[iface.Location][]*adiomv1.Update, error) {
 	var count uint64
 	var firstErr error
@@ -560,10 +544,55 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		return shardKeyCheckError(err)
 	}
 
+	run := updatesRun{
+		namespaces:     namespaces,
+		shardKeyFields: shardKeyFields,
+		tokenMap:       tokenMap,
+		epoch:          readPlanStartAt,
+		openStream: func(ctx context.Context, loc iface.Location) (eventStream, func(), error) {
+			token, _ := tokenMap.GetToken(loc) // Missing tokens intentionally use the plan timestamp below.
+			opts := resumeChangeStreamOptions(readPlanStartAt, token)
+			changeStream, err := createChangeStream(ctx, c.client, loc, opts, c.connectorSettings.WithDelete)
+			if err != nil {
+				return nil, nil, err
+			}
+			return changeStream, func() { changeStream.Close(ctx) }, nil
+		},
+		send:        s.Send,
+		deletesSent: &c.deletesCount,
+	}
+	if c.connectorSettings.EmulateDeletes {
+		var nss []iface.Namespace
+		for _, namespace := range namespaces {
+			nss = append(nss, iface.Namespace{Db: namespace.Db, Col: namespace.Col})
+		}
+		run.deletesInterval = c.connectorSettings.DeletesCheckInterval
+		run.forceDelete = c.forceDelete
+		run.checkDeletes = func(ctx context.Context) (map[iface.Location][]*adiomv1.Update, error) {
+			return checkForDeletes(ctx, c.client, c.witnessMongoClient, nss)
+		}
+	}
+	return run.run(ctx)
+}
+
+type updatesRun struct {
+	namespaces      []iface.Namespace
+	shardKeyFields  map[iface.Namespace][]string
+	tokenMap        *TokenMap
+	epoch           int64
+	openStream      func(ctx context.Context, loc iface.Location) (eventStream, func(), error)
+	checkDeletes    func(ctx context.Context) (map[iface.Location][]*adiomv1.Update, error)
+	deletesInterval time.Duration
+	forceDelete     <-chan struct{}
+	send            func(*adiomv1.StreamUpdatesResponse) error
+	deletesSent     *atomic.Uint64
+}
+
+func (u updatesRun) run(ctx context.Context) error {
 	sender := &cursorSender{mu: &sync.Mutex{}}
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errCh := make(chan error, len(namespaces)+1)
+	errCh := make(chan error, len(u.namespaces)+1)
 	reportError := func(err error) {
 		if err == nil || errors.Is(err, context.Canceled) {
 			return
@@ -574,31 +603,27 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		default:
 		}
 	}
-
-	if c.connectorSettings.EmulateDeletes {
-		var nss []iface.Namespace
-		for _, namespace := range namespaces {
-			nss = append(nss, iface.Namespace{Db: namespace.Db, Col: namespace.Col})
-		}
+	var deletes sync.WaitGroup
+	if u.checkDeletes != nil {
+		deletes.Add(1)
 		go func() {
-			ticker := time.NewTicker(c.connectorSettings.DeletesCheckInterval)
+			defer deletes.Done()
+			ticker := time.NewTicker(u.deletesInterval)
 			defer ticker.Stop()
-
 			runDelete := func() {
-				// check for deletes
 				slog.Debug("Checking for deletes")
 				err := deliverEmulatedDeletes(func() (map[iface.Location][]*adiomv1.Update, error) {
-					return checkForDeletes(streamCtx, c.client, c.witnessMongoClient, nss)
+					return u.checkDeletes(streamCtx)
 				}, func(loc iface.Location, updates []*adiomv1.Update) error {
-					return sendWithCursor(sender, tokenMap, readPlanStartAt, loc, nil, func(cursor []byte) error {
-						if err := s.Send(&adiomv1.StreamUpdatesResponse{
+					return sendWithCursor(sender, u.tokenMap, u.epoch, loc, nil, func(cursor []byte) error {
+						if err := u.send(&adiomv1.StreamUpdatesResponse{
 							Updates:    updates,
 							Namespace:  fmt.Sprintf("%v.%v", loc.Database, loc.Collection),
 							NextCursor: cursor,
 						}); err != nil {
 							return fmt.Errorf("failed to send emulated deletes: %w", err)
 						}
-						c.deletesCount.Add(uint64(len(updates)))
+						u.deletesSent.Add(uint64(len(updates)))
 						return nil
 					})
 				})
@@ -606,14 +631,13 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 					reportError(err)
 					return
 				}
-				ticker.Reset(c.connectorSettings.DeletesCheckInterval)
+				ticker.Reset(u.deletesInterval)
 			}
-
 			for {
 				select {
 				case <-streamCtx.Done():
 					return
-				case <-c.forceDelete:
+				case <-u.forceDelete:
 					runDelete()
 				case <-ticker.C:
 					runDelete()
@@ -621,26 +645,21 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 			}
 		}()
 	}
-
 	var wg sync.WaitGroup
-	for _, ns := range namespaces {
+	for _, ns := range u.namespaces {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			//get task location and retrieve resume token
 			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
-			token, _ := tokenMap.GetToken(loc) // Missing tokens intentionally use the plan timestamp below.
-			opts := resumeChangeStreamOptions(readPlanStartAt, token)
-			changeStream, err := createChangeStream(streamCtx, c.client, loc, opts, c.connectorSettings.WithDelete)
+			changeStream, closeStream, err := u.openStream(streamCtx, loc)
 			if err != nil {
 				reportError(fmt.Errorf("failed to create update change stream for %s.%s: %w", loc.Database, loc.Collection, err))
 				return
 			}
-			defer changeStream.Close(streamCtx)
-
-			err = streamNamespaceEvents(streamCtx, changeStream, loc, shardKeyFields[ns], func(updates []*adiomv1.Update, token bson.Raw) error {
-				return sendWithCursor(sender, tokenMap, readPlanStartAt, loc, token, func(cursor []byte) error {
-					if err := s.Send(&adiomv1.StreamUpdatesResponse{
+			defer closeStream()
+			err = streamNamespaceEvents(streamCtx, changeStream, loc, u.shardKeyFields[ns], func(updates []*adiomv1.Update, token bson.Raw) error {
+				return sendWithCursor(sender, u.tokenMap, u.epoch, loc, token, func(cursor []byte) error {
+					if err := u.send(&adiomv1.StreamUpdatesResponse{
 						Updates:    updates,
 						Namespace:  fmt.Sprintf("%v.%v", ns.Db, ns.Col),
 						NextCursor: cursor,
@@ -654,12 +673,18 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		}()
 	}
 	wg.Wait()
+	cancel()
+	deletes.Wait()
 	select {
 	case err := <-errCh:
 		return connect.NewError(connect.CodeInternal, err)
 	default:
 	}
 	return nil
+}
+
+func lsnWithDeletes(tracked int64, deletes *atomic.Uint64, base uint64) uint64 {
+	return uint64(tracked) + deletes.Load() - base
 }
 
 func (c *conn) ForceDelete() {

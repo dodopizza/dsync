@@ -193,12 +193,3 @@ func TestStreamNamespaceEventsPassesShardKeyFieldsIntoEveryId(t *testing.T) {
 	require.Len(t, out, 1)
 	require.Equal(t, []string{"_id", "tenant"}, idNames(out[0].updates[0]))
 }
-
-func TestSourceIdCheckEmitsNoDeletesWhenTheCursorFails(t *testing.T) {
-	client, _ := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), readFailedReply, cursorKilledReply)
-	idsToDelete := make(chan idsWithLocation, 1)
-
-	checkSourceIdsAndGenerateDeletesWorker(t.Context(), client, idsWithLocation{loc: testLoc, ids: []any{int32(1)}}, idsToDelete)
-
-	require.Empty(t, idsToDelete)
-}
