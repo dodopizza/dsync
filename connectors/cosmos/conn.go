@@ -424,7 +424,7 @@ func shardKeyIdPart(change mongoconn.MongoUpdate, field string) (*adiomv1.BsonVa
 		}
 		part, err := marshalIDPart(field, k.Value)
 		if err != nil {
-			return nil, fmt.Errorf("shard key field %v: %w", field, err)
+			return nil, fmt.Errorf("shard key field: %w", err)
 		}
 		return part, nil
 	}

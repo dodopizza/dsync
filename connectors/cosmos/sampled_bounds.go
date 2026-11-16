@@ -34,8 +34,12 @@ func sampledBounds(ctx context.Context, min, max bson.RawValue, numParts int, sa
 	if !sameIDKind(min, max) {
 		return nil, fmt.Errorf("cannot sample a range between ids of kind %s and %s", idKind(min), idKind(max))
 	}
+	if numParts <= 0 {
+		return nil, fmt.Errorf("not enough usable id samples")
+	}
 	size := numParts * samplesPerPartition
-	if size > maxIDSamples {
+	capped := size > maxIDSamples
+	if capped {
 		size = maxIDSamples
 	}
 	samples, err := sample(ctx, int64(size))
@@ -54,18 +58,29 @@ func sampledBounds(ctx context.Context, min, max bson.RawValue, numParts int, sa
 	slices.SortFunc(inner, compareIDs)
 	inner = slices.CompactFunc(inner, func(a, b bson.RawValue) bool { return compareIDs(a, b) == 0 })
 
-	step := size / numParts
-	if step < 1 {
-		step = 1
-	}
-	bounds := []bson.RawValue{min}
-	for i := step - 1; i < len(inner) && len(bounds) < numParts; i += step {
-		bounds = append(bounds, inner[i])
-	}
+	bounds := append([]bson.RawValue{min}, innerBounds(inner, numParts, capped)...)
 	if len(bounds) == 1 {
 		return nil, fmt.Errorf("not enough usable id samples")
 	}
 	return append(bounds, max), nil
+}
+
+func innerBounds(inner []bson.RawValue, numParts int, capped bool) []bson.RawValue {
+	var bounds []bson.RawValue
+	if !capped {
+		for i := samplesPerPartition - 1; i < len(inner) && len(bounds) < numParts-1; i += samplesPerPartition {
+			bounds = append(bounds, inner[i])
+		}
+		return bounds
+	}
+	previous := -1
+	for k := 1; k < numParts; k++ {
+		if i := k*len(inner)/numParts - 1; i > previous {
+			bounds = append(bounds, inner[i])
+			previous = i
+		}
+	}
+	return bounds
 }
 
 func idKind(v bson.RawValue) string {

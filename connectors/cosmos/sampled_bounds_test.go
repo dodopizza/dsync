@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -331,4 +332,33 @@ func TestSampledBoundsCapTheSampleSize(t *testing.T) {
 	require.Equal(t, []int64{10000}, sampler.sizes)
 	require.Len(t, bounds, 5001)
 	requireStrictlyIncreasing(t, bounds)
+}
+
+func TestCappedSampledBoundsSpreadEvenlyWhenNumPartsDoesNotDivideTheCap(t *testing.T) {
+	sampler := &fakeSampler{ids: stringIDs(t, 0, maxIDSamples)}
+
+	bounds, err := partitionBounds(t.Context(), rawOf(t, "k"), rawOf(t, "l"), 3000, sampler.sample)
+
+	require.NoError(t, err)
+	require.Len(t, bounds, 3001)
+	previous := -1
+	sizes := make([]int, 0, 3000)
+	for _, bound := range bounds[1 : len(bounds)-1] {
+		var index int
+		_, err := fmt.Sscanf(bound.StringValue(), "k%d", &index)
+		require.NoError(t, err)
+		sizes = append(sizes, index-previous)
+		previous = index
+	}
+	sizes = append(sizes, maxIDSamples-1-previous)
+	require.LessOrEqual(t, slices.Max(sizes), slices.Min(sizes)+1)
+}
+
+func TestSampledBoundsWithoutPartsFailsWithoutSampling(t *testing.T) {
+	sampler := &fakeSampler{ids: stringIDs(t, 0, 100)}
+
+	_, err := partitionBounds(t.Context(), rawOf(t, "k"), rawOf(t, "l"), 0, sampler.sample)
+
+	require.ErrorContains(t, err, "not enough usable id samples")
+	require.Empty(t, sampler.sizes)
 }
