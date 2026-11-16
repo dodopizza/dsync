@@ -377,14 +377,14 @@ func TestSamplePipeline_MatchesQueryAfterSample(t *testing.T) {
 		{{"$sample", bson.D{{"size", int64(10)}}}},
 		{{"$match", q}},
 		{{"$project", bson.D{{"_id", 1}}}},
-	}, samplePipeline(10, q))
+	}, SamplePipeline(10, q))
 }
 
 func TestSamplePipeline_NoQuery(t *testing.T) {
 	assert.Equal(t, mongo.Pipeline{
 		{{"$sample", bson.D{{"size", int64(1)}}}},
 		{{"$project", bson.D{{"_id", 1}}}},
-	}, samplePipeline(1, nil))
+	}, SamplePipeline(1, nil))
 }
 
 func TestIDTypeAliasesCoverOrdinaryIDTypes(t *testing.T) {

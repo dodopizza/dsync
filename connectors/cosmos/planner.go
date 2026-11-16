@@ -118,7 +118,7 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 					slog.Debug(fmt.Sprintf("Min and max boundaries for task %v: %v, %v", nsTask, min, max))
 					// find split points
 					numParts := int(count / cc.settings.TargetDocCountPerPartition)
-					splitBounds, err := splitRange(min, max, numParts)
+					splitBounds, err := partitionBounds(cc.Ctx, min, max, numParts, cc.idSampler(nsTask))
 					if err != nil {
 						slog.Warn(fmt.Sprintf("Failed to split range for task %v so not splitting: %v", nsTask, err))
 						task := cc.createReadPlanTaskForNs(nsTask)

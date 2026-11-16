@@ -243,45 +243,6 @@ func extractRidFromResumeToken(resumeToken bson.Raw) (string, error) {
 	return payload.Rid, nil
 }
 
-// create a find query for a task
-func createFindQuery(ctx context.Context, collection *mongo.Collection, task iface.ReadPlanTask) (cur *mongo.Cursor, err error) {
-	if task.Def.Low == nil && task.Def.High == nil { //no boundaries
-
-		return collection.Find(ctx, bson.D{})
-	} else if task.Def.Low == nil && task.Def.High != nil { //only upper boundary
-		if task.Def.PartitionKey == "" {
-			return nil, fmt.Errorf("Invalid task definition: %v", task)
-		}
-
-		return collection.Find(ctx, bson.D{
-			{task.Def.PartitionKey, bson.D{
-				{"$lt", task.Def.High},
-			}},
-		})
-	} else if task.Def.Low != nil && task.Def.High == nil { //only lower boundary
-		if task.Def.PartitionKey == "" {
-			return nil, fmt.Errorf("Invalid task definition: %v", task)
-		}
-
-		return collection.Find(ctx, bson.D{
-			{task.Def.PartitionKey, bson.D{
-				{"$gte", task.Def.Low},
-			}},
-		})
-	} else { //both boundaries
-		if task.Def.PartitionKey == "" {
-			return nil, fmt.Errorf("Invalid task definition: %v", task)
-		}
-
-		return collection.Find(ctx, bson.D{
-			{task.Def.PartitionKey, bson.D{
-				{"$gte", task.Def.Low},
-				{"$lt", task.Def.High},
-			}},
-		})
-	}
-}
-
 func nsToString(ns iface.Namespace) string {
 	return fmt.Sprintf("%s.%s", ns.Db, ns.Col)
 }
