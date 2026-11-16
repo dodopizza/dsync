@@ -101,6 +101,18 @@ func TestStreamNamespaceEventsStopsOnFailureAfterBufferedEvent(t *testing.T) {
 	}
 }
 
+func TestStreamNamespaceEventsReturnsStreamError(t *testing.T) {
+	boom := errors.New("stream broke")
+	stream := &fakeStream{events: []fakeEvent{goodEvent(1, "t1")}, err: boom}
+	var out []flushed
+
+	err := streamNamespaceEvents(context.Background(), stream, testLoc, recordFlushes(&out))
+
+	require.ErrorIs(t, err, boom)
+	require.ErrorContains(t, err, "db1.col1")
+	require.Empty(t, out)
+}
+
 func TestStreamNamespaceEventsFlushesEventWithoutFullDocumentAtBatchEnd(t *testing.T) {
 	noDoc := fakeEvent{
 		event:     mongoconn.MongoUpdate{DocumentKey: bson.D{{Key: "_id", Value: int32(2)}}},
@@ -134,13 +146,22 @@ func TestDeliverEmulatedDeletesReturnsCheckErrorWithoutSending(t *testing.T) {
 
 func TestDeleteUpdatesFromIDsReportsMarshalErrorAndDrainsProducer(t *testing.T) {
 	ch := make(chan idsWithLocation)
-	done := make(chan struct{})
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		<-exited
+	})
 	go func() {
-		defer close(done)
+		defer close(exited)
 		defer close(ch)
-		ch <- idsWithLocation{loc: testLoc, ids: []any{int32(1), make(chan int), int32(3)}}
-		ch <- idsWithLocation{loc: testLoc, ids: []any{int32(4)}}
-		ch <- idsWithLocation{loc: testLoc, ids: []any{int32(5)}}
+		for _, ids := range [][]any{{int32(1), make(chan int), int32(3)}, {int32(4)}, {int32(5)}} {
+			select {
+			case ch <- idsWithLocation{loc: testLoc, ids: ids}:
+			case <-stop:
+				return
+			}
+		}
 	}()
 
 	updates, err := deleteUpdatesFromIDs(ch)
@@ -148,7 +169,7 @@ func TestDeleteUpdatesFromIDsReportsMarshalErrorAndDrainsProducer(t *testing.T) 
 	require.ErrorContains(t, err, "db1.col1")
 	require.Nil(t, updates)
 	select {
-	case <-done:
+	case <-exited:
 	case <-time.After(5 * time.Second):
 		t.Fatal("producer blocked")
 	}

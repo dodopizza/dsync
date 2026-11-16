@@ -7,6 +7,7 @@
 package cosmos
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -60,22 +61,16 @@ func splitRangeObjectId(value1 bson.RawValue, value2 bson.RawValue, numParts int
 	diff := maxT.Sub(minT)
 	partSize := diff / time.Duration(numParts)
 
-	// create the boundaries (except the min and max)
-	boundaries := make([]bson.RawValue, numParts+1)
+	boundaries := []bson.RawValue{value1}
 	for i := 1; i < numParts; i++ {
 		t := minT.Add(time.Duration(i) * partSize)
 		val := bson.NewObjectIDFromTimestamp(t)
-		boundaries[i] = bson.RawValue{
-			Type:  bson.TypeObjectID,
-			Value: val[:],
+		last := boundaries[len(boundaries)-1].Value
+		if bytes.Compare(val[:], last) > 0 && bytes.Compare(val[:], value2.Value) < 0 {
+			boundaries = append(boundaries, bson.RawValue{Type: bson.TypeObjectID, Value: val[:]})
 		}
 	}
-
-	// add the mina nd max boundaries to be precise
-	boundaries[0] = value1
-	boundaries[numParts] = value2
-
-	return boundaries, nil
+	return append(boundaries, value2), nil
 }
 
 // get min and max boundaries for a namespace task
@@ -109,18 +104,4 @@ func getMinAndMax(ctx context.Context, client *mongo.Client, ns iface.Namespace,
 	bottomId := bottomCursor.Current.Lookup(partitionKey)
 
 	return bottomId, topId, nil
-}
-
-// function to find the closest (lower or equal) value in the collection
-func findClosestLowerValue(ctx context.Context, collection *mongo.Collection, partitionKey string, value interface{}) (bson.RawValue, error) {
-	opts := options.FindOne().SetSort(bson.D{{partitionKey, -1}})
-	filter := bson.D{{partitionKey, bson.D{{"$lte", value}}}}
-	resRaw, err := collection.FindOne(ctx, filter, opts).Raw()
-	if err != nil {
-		return bson.RawValue{}, err
-	}
-	if resRaw == nil {
-		return bson.RawValue{}, fmt.Errorf("failed to find the closest value to %v in %v", value, collection.Name())
-	}
-	return resRaw.Lookup(partitionKey), nil
 }

@@ -86,7 +86,7 @@ func TestLatestResumeTokenWithReadOnlyKeyComesFromOpenCursor(t *testing.T) {
 	}
 }
 
-func TestLatestResumeTokenWithReadOnlyKeyAndNoCursorTokenStaysEmpty(t *testing.T) {
+func TestLatestResumeTokenWithReadOnlyKeyAndNoCursorTokenFails(t *testing.T) {
 	for name, read := range map[string]bson.D{
 		"cursor has no token":      cursorReply("nextBatch", bson.A{}, nil),
 		"reading the cursor fails": readFailedReply,
@@ -96,7 +96,7 @@ func TestLatestResumeTokenWithReadOnlyKeyAndNoCursorTokenStaysEmpty(t *testing.T
 
 			token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false)
 
-			require.NoError(t, err)
+			require.ErrorContains(t, err, "read-only")
 			require.Nil(t, token)
 			require.Equal(t, deniedThenRead, *commands)
 		})
@@ -137,4 +137,17 @@ func TestGeneratePlanWithReadOnlyKeyResumesAfterCursorToken(t *testing.T) {
 	}
 	require.Equal(t, mustMarshalBSON(t, cursorToken), streamOptions.ResumeAfter)
 	require.Nil(t, streamOptions.StartAtOperationTime)
+}
+
+func TestGeneratePlanWithReadOnlyKeyAndNoCursorTokenFailsNamingNamespace(t *testing.T) {
+	client, _ := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), collectionInfoReply, insertDeniedReply, cursorReply("nextBatch", bson.A{}, nil), cursorKilledReply)
+	connector := &conn{client: client, connectorSettings: ConnectorSettings{MaxNumNamespaces: 1}}
+
+	plan, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+		Namespaces: []string{"db.col"}, Updates: true,
+	}))
+
+	require.Nil(t, plan)
+	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+	require.ErrorContains(t, err, "db.col")
 }

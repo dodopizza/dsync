@@ -40,9 +40,8 @@ type planner struct {
 
 // partitionTasksIfNecessary checks all the namespace tasks and partitions them if necessary
 // returns the final list of tasks to be executed with unique task ids
-func (cc *planner) partitionTasksIfNecessary(namespaceTasks []iface.Namespace) ([]iface.ReadPlanTask, error) {
+func (cc *planner) partitionTasksIfNecessary(namespaceTasks []iface.Namespace) []iface.ReadPlanTask {
 	countCheckChannel := make(chan iface.Namespace, len(namespaceTasks))
-	approxTasksChannel := make(chan iface.ReadPlanTask, len(namespaceTasks))
 
 	finalTasksChannel := make(chan iface.ReadPlanTask, len(namespaceTasks))
 	finalTasks := make([]iface.ReadPlanTask, 0, len(namespaceTasks))
@@ -55,10 +54,7 @@ func (cc *planner) partitionTasksIfNecessary(namespaceTasks []iface.Namespace) (
 		close(countCheckChannel)
 	}()
 
-	// do parallel counting (async) and generate approximate boundaries
-	go cc.parallelNamespaceTaskPreparer(countCheckChannel, finalTasksChannel, approxTasksChannel)
-	// do parallel task generation based on approximate boundaries (skip those with matching boundaries - empty tasks)
-	go cc.parallelTaskBoundsClarifier(approxTasksChannel, finalTasksChannel)
+	go cc.parallelNamespaceTaskPreparer(countCheckChannel, finalTasksChannel)
 
 	// get all the finalized tasks and assign sequential task ids
 	taskId := iface.ReadPlanTaskID(1)
@@ -67,52 +63,7 @@ func (cc *planner) partitionTasksIfNecessary(namespaceTasks []iface.Namespace) (
 		finalTasks = append(finalTasks, task)
 		taskId++
 	}
-	return finalTasks, nil
-}
-
-// In parallel clarifies bounds for tasks that have approximate boundaries
-// Replaces the approximate bound with the closest lower or equal value found
-// Disconiues the task if the bounds are the same
-// Outputs finalized tasks into the finalTasksChannel
-func (cc *planner) parallelTaskBoundsClarifier(approxTasksChannel <-chan iface.ReadPlanTask, finalTasksChannel chan<- iface.ReadPlanTask) {
-	//define workgroup
-	wg := sync.WaitGroup{}
-	wg.Add(cc.settings.NumParallelPartitionWorkers)
-	// create workers to do the work
-	for i := 0; i < cc.settings.NumParallelPartitionWorkers; i++ {
-		go func() {
-			for task := range approxTasksChannel {
-				collection := cc.Client.Database(task.Def.Db).Collection(task.Def.Col)
-
-				// first, clarify the low value
-				valLow, errLow := findClosestLowerValue(cc.Ctx, collection, task.Def.PartitionKey, task.Def.Low)
-				if errLow != nil {
-					slog.Error(fmt.Sprintf("Failed to clarify low value for task %v: %v", task, errLow))
-					continue //XXX: this task will be skipped, should we panic here?
-				}
-
-				// then, clarify the high value
-				valHigh, errHigh := findClosestLowerValue(cc.Ctx, collection, task.Def.PartitionKey, task.Def.High)
-				if errHigh != nil {
-					slog.Error(fmt.Sprintf("Failed to clarify high value for task %v: %v", task, errHigh))
-					continue //XXX: this task will be skipped, should we panic here?
-				}
-
-				// if the bounds are the same, then we don't need to do anything
-				if !valLow.Equal(valHigh) {
-					task.Def.Low = valLow
-					task.Def.High = valHigh
-					task.EstimatedDocCount = cc.settings.TargetDocCountPerPartition
-					finalTasksChannel <- task
-				}
-			}
-			wg.Done()
-		}()
-	}
-
-	// wait for all workers to finish and close the finalTasksChannel channel
-	wg.Wait()
-	close(finalTasksChannel)
+	return finalTasks
 }
 
 func (cc *planner) createReadPlanTaskForNs(ns iface.Namespace) iface.ReadPlanTask {
@@ -124,9 +75,8 @@ func (cc *planner) createReadPlanTaskForNs(ns iface.Namespace) iface.ReadPlanTas
 	return task
 }
 
-// In parallel checks the count of the namespace and segregates them into two channels
-// One for finalized tasks, and another for partitioned tasks with approximate bounds that need to be clarified
-func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.Namespace, finalTasksChannel chan<- iface.ReadPlanTask, approxTasksChannel chan<- iface.ReadPlanTask) {
+// In parallel checks the count of the namespace and sends the resulting tasks to the final channel, closing it when done
+func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.Namespace, finalTasksChannel chan<- iface.ReadPlanTask) {
 	//define workgroup
 	wg := sync.WaitGroup{}
 	wg.Add(cc.settings.NumParallelPartitionWorkers)
@@ -192,14 +142,14 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 					finalTasksChannel <- minTask
 					finalTasksChannel <- maxTask
 
-					//send the tasks with approx boundaries downstream
+					//send the tasks between the split points
 					for i := 0; i < len(approxBounds)-1; i++ {
 						task := cc.createReadPlanTaskForNs(nsTask)
 						task.Def.PartitionKey = cc.settings.partitionKey
 						task.Def.Low = approxBounds[i]
 						task.Def.High = approxBounds[i+1]
 						task.EstimatedDocCount = cc.settings.TargetDocCountPerPartition
-						approxTasksChannel <- task
+						finalTasksChannel <- task
 					}
 
 				}
@@ -208,7 +158,6 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 		}()
 	}
 
-	// wait for all workers to finish and close the approxTasksChannel channel
 	wg.Wait()
-	close(approxTasksChannel)
+	close(finalTasksChannel)
 }

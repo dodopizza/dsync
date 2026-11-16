@@ -136,16 +136,21 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		}
 	}
 
+	tokenMap := NewTokenMap()
+	if r.Msg.GetUpdates() {
+		tokenMap, err = c.collectResumeTokens(ctx, nsTasks)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+	}
+
 	if r.Msg.GetInitialSync() {
 		p := planner{
 			Ctx:      ctx,
 			Client:   c.client,
 			settings: c.connectorSettings,
 		}
-		partitionedTasks, err := p.partitionTasksIfNecessary(nsTasks)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
+		partitionedTasks := p.partitionTasksIfNecessary(nsTasks)
 		if len(nsTasks) > 1 {
 			shuffleTasks(partitionedTasks)
 		}
@@ -170,32 +175,6 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		partitions = initialPartitions
 	}
 
-	tokenMap := NewTokenMap()
-
-	//create resume token for each task
-	wg := sync.WaitGroup{}
-	var cleanupErr error
-	var cleanupErrOnce sync.Once
-	for _, nsTask := range nsTasks {
-		wg.Add(1)
-		go func(ns iface.Namespace) {
-			defer wg.Done()
-			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
-			resumeToken, err := getLatestResumeToken(ctx, c.client, loc, c.connectorSettings.WithDelete)
-			if err != nil {
-				slog.Error(fmt.Sprintf("Failed to get latest resume token for namespace %v: %v", ns, err))
-				if errors.Is(err, errDummyRecordCleanup) {
-					cleanupErrOnce.Do(func() { cleanupErr = err })
-				}
-				return
-			}
-			tokenMap.AddToken(loc, resumeToken)
-		}(nsTask)
-	}
-	wg.Wait()
-	if cleanupErr != nil {
-		return nil, connect.NewError(connect.CodeInternal, cleanupErr)
-	}
 	slog.Debug(fmt.Sprintf("Read Plan Resume token map: %v", tokenMap.Map))
 	//serialize the resume token map
 	resumeToken, err := tokenMap.encodeMap()
@@ -214,6 +193,31 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		Partitions:        partitions,
 		UpdatesPartitions: []*adiomv1.UpdatesPartition{{Namespaces: updatesNamespaces, Cursor: encodedResumeToken}},
 	}), nil
+}
+
+func (c *conn) collectResumeTokens(ctx context.Context, nsTasks []iface.Namespace) (*TokenMap, error) {
+	tokenMap := NewTokenMap()
+	wg := sync.WaitGroup{}
+	tokenErrs := make([]error, len(nsTasks))
+	for i, nsTask := range nsTasks {
+		wg.Add(1)
+		go func(i int, ns iface.Namespace) {
+			defer wg.Done()
+			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
+			resumeToken, err := getLatestResumeToken(ctx, c.client, loc, c.connectorSettings.WithDelete)
+			if err != nil {
+				tokenErrs[i] = fmt.Errorf("resume token for %s.%s: %w", ns.Db, ns.Col, err)
+				return
+			}
+			tokenMap.AddToken(loc, resumeToken)
+		}(i, nsTask)
+	}
+	wg.Wait()
+	if err := errors.Join(tokenErrs...); err != nil {
+		slog.Error(fmt.Sprintf("Failed to get resume tokens: %v", err))
+		return nil, err
+	}
+	return tokenMap, nil
 }
 
 // GetInfo implements adiomv1connect.ConnectorServiceHandler.

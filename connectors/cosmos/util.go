@@ -82,7 +82,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 	result, err := col.InsertOne(ctx, dummyInsertFilter)
 	if err != nil {
 		if isUnauthorizedWrite(err) {
-			return resumeTokenWithoutDummyRecord(ctx, changeStream, location), nil
+			return resumeTokenWithoutDummyRecord(ctx, changeStream, location)
 		}
 		return nil, fmt.Errorf("failed to insert dummy record: %w", err)
 	}
@@ -92,7 +92,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if _, deleteErr := col.DeleteOne(cleanupCtx, deleteFilter); deleteErr != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("%w for %s.%s: %w", errDummyRecordCleanup, location.Database, location.Collection, deleteErr))
+			retErr = errors.Join(retErr, fmt.Errorf("%w: %w", errDummyRecordCleanup, deleteErr))
 		}
 	}()
 
@@ -123,7 +123,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 // A read-only key cannot insert the dummy record. The change stream was still
 // opened before the copy starts, so its own position is an equally safe start,
 // and unlike a start by timestamp it works on accounts with merged partitions.
-func resumeTokenWithoutDummyRecord(ctx context.Context, changeStream *mongo.ChangeStream, location iface.Location) bson.Raw {
+func resumeTokenWithoutDummyRecord(ctx context.Context, changeStream *mongo.ChangeStream, location iface.Location) (bson.Raw, error) {
 	// The driver's first TryNext only consumes the batch returned when the stream
 	// was opened; the second one is the first to ask the server for more.
 	for attempt := 0; attempt < 2 && changeStream.ResumeToken() == nil; attempt++ {
@@ -131,10 +131,9 @@ func resumeTokenWithoutDummyRecord(ctx context.Context, changeStream *mongo.Chan
 	}
 	if token := changeStream.ResumeToken(); token != nil {
 		slog.Info(fmt.Sprintf("Not authorized to insert dummy record for %v, using the resume token of the open change stream - is the namespace read-only?", location))
-		return token
+		return token, nil
 	}
-	slog.Warn(fmt.Sprintf("Not authorized to insert dummy record for %v and the open change stream gave no resume token, the change stream will start by timestamp - is the namespace read-only?", location), "err", changeStream.Err())
-	return nil
+	return nil, errors.Join(fmt.Errorf("not authorized to insert dummy record and the open change stream gave no resume token - is the namespace read-only?"), changeStream.Err())
 }
 
 func extractShardKeyFields(collectionInfo bson.Raw) ([]string, error) {

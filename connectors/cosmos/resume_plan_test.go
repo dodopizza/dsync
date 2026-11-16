@@ -52,7 +52,6 @@ func TestLatestResumeTokenReportsCleanupFailureWithValidToken(t *testing.T) {
 	token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false)
 	require.NotEmpty(t, token, "the token was obtained before cleanup failed")
 	require.ErrorIs(t, err, errDummyRecordCleanup)
-	require.ErrorContains(t, err, "db.col")
 	require.ErrorContains(t, err, "dummy deletion denied")
 }
 
@@ -61,27 +60,28 @@ func TestGeneratePlanCleanupFailureIsFatal(t *testing.T) {
 		name      string
 		responses []bson.D
 		fatal     bool
-		hasToken  bool
+		cleanup   bool
 	}{
 		{
 			name: "successful cleanup preserves token",
 			responses: resumePlanningResponses(bson.D{
 				{Key: "ok", Value: 1}, {Key: "n", Value: 1},
 			}),
-			hasToken: true,
 		},
 		{
 			name: "failed cleanup rejects plan instead of falling back",
 			responses: resumePlanningResponses(bson.D{
 				{Key: "ok", Value: 0}, {Key: "code", Value: 13}, {Key: "errmsg", Value: "dummy deletion denied"},
 			}),
-			fatal: true,
+			fatal:   true,
+			cleanup: true,
 		},
 		{
-			name: "unavailable token retains timestamp fallback",
+			name: "unavailable token rejects plan instead of falling back",
 			responses: []bson.D{{
 				{Key: "ok", Value: 0}, {Key: "code", Value: 13}, {Key: "errmsg", Value: "change stream unavailable"},
 			}},
+			fatal: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -95,8 +95,13 @@ func TestGeneratePlanCleanupFailureIsFatal(t *testing.T) {
 			if test.fatal {
 				require.Nil(t, plan)
 				require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
-				require.ErrorIs(t, err, errDummyRecordCleanup)
-				require.ErrorContains(t, err, "dummy deletion denied")
+				require.ErrorContains(t, err, "db.col")
+				if test.cleanup {
+					require.ErrorIs(t, err, errDummyRecordCleanup)
+					require.ErrorContains(t, err, "dummy deletion denied")
+				} else {
+					require.ErrorContains(t, err, "change stream unavailable")
+				}
 				return
 			}
 			require.NoError(t, err)
@@ -107,11 +112,7 @@ func TestGeneratePlanCleanupFailureIsFatal(t *testing.T) {
 			tokens := NewTokenMap()
 			require.NoError(t, tokens.decodeMap(encodedTokens))
 			token, _ := tokens.GetToken(iface.Location{Database: "db", Collection: "col"})
-			if test.hasToken {
-				require.NotEmpty(t, token)
-			} else {
-				require.Empty(t, tokens.Map)
-			}
+			require.NotEmpty(t, token)
 		})
 	}
 }
