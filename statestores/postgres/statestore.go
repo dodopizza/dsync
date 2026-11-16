@@ -70,13 +70,13 @@ func sanitize(err error) error {
 	if err == nil {
 		return nil
 	}
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
-		return fmt.Errorf("postgres state store request failed: SQLSTATE %s", pgErr.Code)
-	}
 	return classify("postgres state store request failed", err)
 }
 
 func classify(msg string, err error) error {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
+		return fmt.Errorf("%s: SQLSTATE %s", msg, pgErr.Code)
+	}
 	if _, ok := errors.AsType[*pgconn.ConnectError](err); ok {
 		msg += ": could not connect"
 	}
@@ -101,9 +101,6 @@ func (s *StateStore) Setup(ctx context.Context) error {
 	defer cancel()
 	if _, err := q.Exec(checkCtx, checkSQL); err != nil {
 		closePool()
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
-			return fmt.Errorf("postgres state store is not usable: %s: SQLSTATE %s", setupHint, pgErr.Code)
-		}
 		return fmt.Errorf("%w: %s", classify("postgres state store is not usable", err), setupHint)
 	}
 	s.q, s.closePool = q, closePool

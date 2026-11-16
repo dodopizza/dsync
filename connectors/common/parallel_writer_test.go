@@ -441,7 +441,7 @@ func TestParallelWriterBlockBarrierReturnsOnlyAfterEveryWorkerFlushed(t *testing
 	})
 }
 
-func TestParallelWriterBlockBarrierReturnsWriterClosedOnCancelledContext(t *testing.T) {
+func TestParallelWriterWorkerLeavesBlockBarrierOnCancelSoStopDoesNotTimeOut(t *testing.T) {
 	per := pwUpdatesPerWorker()
 	primer, second := per[0][0], per[0][1]
 	c := newPWConn(pwKey(primer), pwKey(second))
