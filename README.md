@@ -125,6 +125,41 @@ GRANT USAGE ON SCHEMA dsync_state TO dsync_state_writer;
 GRANT SELECT, INSERT, UPDATE, DELETE ON dsync_state.objects TO dsync_state_writer;
 ```
 
+## Verify
+
+`dsync verify [verify flags] <left> [left connector flags] <right> [right connector flags]` compares two connectors document by document. It reads both sides, keeps comparing while their change streams run, and reports mismatches. Documents are matched by `_id` only. Verify flags (`--namespaces`, `--once`, `--latency`, `--simple` and so on) go first: flag parsing stops at the first connector, and flags after it belong to that connector.
+
+Exit status: 0 when the last verdict is clean, 1 on any mismatch, source error or usage error. A mismatch error reads `verify found mismatches: N mismatches in M checked`; it carries counts only, and the ids are in the log lines above it.
+
+`--once`:
+* Waits for both initial syncs, then `--latency` plus one second, takes one report, stops both sources, and exits with that verdict.
+* Cannot be combined with `--simple`: that is a usage error raised before any connector is touched.
+* Changes that arrived within the last `--latency` before the report are not judged and count as clean, even when the initial read had found that document different. A change that reaches one side after the report is not seen at all, so run `--once` when the sides are expected to have converged.
+
+`--latency`:
+* Stream changes are judged only after they are `--latency` old, so it must be positive in memory mode (a usage error otherwise). With 0 a stream change would clear a mismatch and never be compared. `--simple` accepts 0.
+
+Signals:
+* SIGINT and SIGTERM end the run with a verdict. Memory mode uses the last report; `--simple` uses all reports so far (any diff counts). An interrupt before the first report is an error.
+* A second Ctrl-C kills the process and skips cleanup.
+
+PostgreSQL as a verify side:
+* `--document-mode`, `--manual`, `--replication-slot` and `--publication-name` are PostgreSQL connector flags: put them after `postgresql://...` on that side, for example `dsync verify --namespaces db.t postgresql://... --document-mode --replication-slot verify_left_slot mongodb://...`. `--partition` is a verify flag and goes first.
+* A document-mode table is read back as documents (see PostgreSQL document mode). Pass `--document-mode` on that side to compare document tables: column mode does not restore the original BSON types.
+* Unless `--manual` is set, verify creates a replication slot and a publication for its change stream, and drops both on exit, whatever the verdict. Cleanup runs after the verifier returned; a slot still held by the closing replication connection is retried for about 5 seconds. A failed drop is logged at error level and does not change the verdict or the exit status. Nothing is dropped with `--manual`, and remote (gRPC) connectors get no cleanup.
+* Use `--replication-slot` and `--publication-name` values that differ from any running sync and from other verify runs. With the default names next to a running sync, verify recreates the publication the sync uses and drops it on exit. When both verify sides are PostgreSQL on one server they need distinct values too: with the same defaults the right side's create drops the left side's slot. Parallel `--partition` runs against one server each need their own: a run's create drops an existing slot and publication of the same name, including another run's.
+* If cleanup failed or was skipped (for example after a second Ctrl-C), drop them by hand; a leftover slot retains WAL on the server:
+```sql
+SELECT pg_drop_replication_slot('<slot>');
+DROP PUBLICATION <name>;
+```
+
+Requirements and limits:
+* Set `REPLICA IDENTITY FULL` on document-mode tables. Without it a delete carries only the key columns, and a numeric `_id` in a delete arrives as int64. With `--partition` that id hashes to another partition, and the owning run reports the document as a permanent mismatch.
+* TRUNCATE on a published table stops the stream with an error. Restart verify; it reads the table again.
+* A collection whose `_id` repeats under different shard key values is not comparable, because documents are matched by `_id` only.
+* Sources whose multi-part ids have no part named `_id` are not supported.
+
 # Quickstart
 Follow these simple instructions to get dsync up and running and perform a migration from our Cosmos DB demo instance to your MongoDB destination.
 

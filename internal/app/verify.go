@@ -4,9 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash"
 	"log/slog"
+	"os"
+	"os/signal"
+	"slices"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -63,6 +70,10 @@ var verifyCommand *cli.Command = &cli.Command{
 			Name:  "simple",
 			Usage: "Use a simple verifier that tails both sources",
 		},
+		&cli.BoolFlag{
+			Name:  "once",
+			Usage: "Compare once after the initial sync and exit with a non-zero status on mismatch (not with --simple)",
+		},
 		&cli.DurationFlag{
 			Name:  "latency",
 			Usage: "How stale entries are before being eligible to compare",
@@ -81,10 +92,11 @@ var verifyCommand *cli.Command = &cli.Command{
 }
 
 type Update struct {
-	Namespace   string
-	ID          []bson.RawValue
-	Data        []byte
-	InitialSync bool
+	Namespace       string
+	ID              []bson.RawValue
+	Data            []byte
+	InitialSync     bool
+	InitialSyncDone bool
 }
 
 type NamespacedID struct {
@@ -112,6 +124,36 @@ type source struct {
 	skipStream      bool
 }
 
+func updateKey(parts []*adiomv1.BsonValue) []bson.RawValue {
+	if i := slices.IndexFunc(parts, func(p *adiomv1.BsonValue) bool { return p.GetName() == "_id" }); i >= 0 {
+		parts = parts[i : i+1]
+	}
+	var key []bson.RawValue
+	for _, p := range parts {
+		key = append(key, bson.RawValue{Type: bson.Type(p.GetType()), Value: p.GetData()})
+	}
+	return key
+}
+
+func send(ctx context.Context, ch chan<- Update, u Update) error {
+	select {
+	case ch <- u:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func hashKey(hasher hash.Hash64, ids []bson.RawValue) (uint64, error) {
+	hasher.Reset()
+	for _, id := range ids {
+		if _, err := hasher.Write(id.Value); err != nil {
+			return 0, err
+		}
+	}
+	return hasher.Sum64(), nil
+}
+
 func (s *source) readUpdates(ctx context.Context, partitions []*adiomv1.UpdatesPartition, ch chan<- Update) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	for _, partition := range partitions {
@@ -133,21 +175,16 @@ func (s *source) readUpdates(ctx context.Context, partitions []*adiomv1.UpdatesP
 					if update.GetType() == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
 						return fmt.Errorf("verify does not support partial updates (namespace %s)", msg.GetNamespace())
 					}
-					var idBson []bson.RawValue
-					for _, id := range update.GetId() {
-						idBson = append(idBson, bson.RawValue{Type: bson.Type(id.GetType()), Value: id.GetData()})
+					idBson := updateKey(update.GetId())
+					if len(idBson) == 0 {
+						return fmt.Errorf("namespace %s: update has no id", msg.GetNamespace())
 					}
-					if update.GetType() == adiomv1.UpdateType_UPDATE_TYPE_DELETE {
-						ch <- Update{
-							Namespace: msg.GetNamespace(),
-							ID:        idBson,
-						}
-					} else {
-						ch <- Update{
-							Namespace: msg.GetNamespace(),
-							ID:        idBson,
-							Data:      update.GetData(),
-						}
+					out := Update{Namespace: msg.GetNamespace(), ID: idBson}
+					if update.GetType() != adiomv1.UpdateType_UPDATE_TYPE_DELETE {
+						out.Data = update.GetData()
+					}
+					if err := send(ctx, ch, out); err != nil {
+						return err
 					}
 				}
 			}
@@ -179,12 +216,17 @@ func (s *source) readPartitions(ctx context.Context, partitions []*adiomv1.Parti
 					return err
 				}
 				for _, d := range res.Msg.GetData() {
-					id := bson.Raw(d).Lookup("_id")
-					ch <- Update{
+					id, err := bson.Raw(d).LookupErr("_id")
+					if err != nil {
+						return fmt.Errorf("namespace %s: document has no _id", partition.GetNamespace())
+					}
+					if err := send(ctx, ch, Update{
 						Namespace:   partition.GetNamespace(),
 						ID:          []bson.RawValue{id},
 						Data:        d,
 						InitialSync: true,
+					}); err != nil {
+						return err
 					}
 				}
 				cursor = res.Msg.GetNextCursor()
@@ -197,8 +239,13 @@ func (s *source) readPartitions(ctx context.Context, partitions []*adiomv1.Parti
 	return eg.Wait()
 }
 
-func (s *source) WaitForInitialSync() {
-	<-s.initialSyncDone
+func (s *source) WaitForInitialSync(ctx context.Context) bool {
+	select {
+	case <-s.initialSyncDone:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *source) ProcessSource(ctx context.Context, process func(context.Context, Update) error) error {
@@ -244,11 +291,12 @@ func (s *source) ProcessSource(ctx context.Context, process func(context.Context
 		defer close(ch)
 		if !s.skipInitialSync {
 			if err := s.readPartitions(egCtx, partitions, ch); err != nil {
-				close(s.initialSyncDone)
 				return err
 			}
 		}
-		close(s.initialSyncDone)
+		if err := send(egCtx, ch, Update{InitialSyncDone: true}); err != nil {
+			return err
+		}
 		if !s.skipStream {
 			if err := s.readUpdates(egCtx, updatePartitions, ch); err != nil {
 				return err
@@ -261,14 +309,16 @@ func (s *source) ProcessSource(ctx context.Context, process func(context.Context
 	eg.Go(func() error {
 		hasher := xxhash.New()
 		for update := range ch {
+			if update.InitialSyncDone {
+				close(s.initialSyncDone)
+				continue
+			}
 			if s.totalPartitions > 0 {
-				hasher.Reset()
-				for _, id := range update.ID {
-					if _, err := hasher.Write(id.Value); err != nil {
-						return err
-					}
+				sum, err := hashKey(hasher, update.ID)
+				if err != nil {
+					return err
 				}
-				if hasher.Sum64()%uint64(s.totalPartitions) != uint64(s.partition) {
+				if sum%uint64(s.totalPartitions) != uint64(s.partition) {
 					continue
 				}
 			}
@@ -314,9 +364,68 @@ type memVerify struct {
 	cooldown           time.Duration
 	latency            time.Duration
 	projection         map[string]interface{}
+	once               bool
+	poll               time.Duration
+	onReport           func(*report)
+	after              func(time.Duration) <-chan time.Time
+}
+
+const verifierPoll = time.Second
+
+var (
+	ErrVerifyMismatch = errors.New("verify found mismatches")
+	errInterrupted    = errors.New("interrupted before the first report")
+)
+
+func mismatchError(mismatches, total int64) error {
+	return fmt.Errorf("%w: %d mismatches in %d checked", ErrVerifyMismatch, mismatches, total)
+}
+
+func sourceError(parent context.Context, err error) error {
+	if err != nil && parent.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+type report struct {
+	mismatches int64
+	total      int64
+}
+
+func (r *report) verdict() error {
+	if r == nil {
+		return errInterrupted
+	}
+	if r.mismatches > 0 {
+		return mismatchError(r.mismatches, r.total)
+	}
+	return nil
+}
+
+func checkVerifyFlags(once, simple bool, latency time.Duration) error {
+	if once && simple {
+		return fmt.Errorf("--once cannot be combined with --simple")
+	}
+	if !simple && latency <= 0 {
+		return fmt.Errorf("--latency must be positive")
+	}
+	return nil
 }
 
 func (m *memVerify) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	poll := m.poll
+	if poll <= 0 {
+		poll = verifierPoll
+	}
+	after := m.after
+	if after == nil {
+		after = time.After
+	}
+	var stopped atomic.Bool
+	var last *report
 	verifiers := map[string]ds.Verifier{}
 	var mut sync.RWMutex
 	getVerifier := func(ns string) ds.Verifier {
@@ -327,7 +436,7 @@ func (m *memVerify) Run(ctx context.Context) error {
 			mut.Lock()
 			v, ok := verifiers[ns]
 			if !ok {
-				v = ds.NewVerifier(ctx, clock.New(), m.latency, time.Second, 0)
+				v = ds.NewVerifier(runCtx, clock.New(), m.latency, poll, 0)
 				verifiers[ns] = v
 			}
 			mut.Unlock()
@@ -336,36 +445,72 @@ func (m *memVerify) Run(ctx context.Context) error {
 		mut.RUnlock()
 		return v
 	}
+	takeReport := func() *report {
+		r := &report{}
+		mut.RLock()
+		for ns, verifier := range verifiers {
+			mismatches, total := verifier.MismatchCountAndTotal()
+			if mismatches > 0 {
+				slog.Info("Verifying", "namespace", ns, "mismatches", mismatches, "count", total, "ids", verifier.Find(m.limit))
+			}
+			r.mismatches += mismatches
+			r.total += total
+		}
+		mut.RUnlock()
+		slog.Info("Verifying", "ok", r.mismatches == 0, "mismatches", r.mismatches, "count", r.total)
+		last = r
+		if m.onReport != nil {
+			m.onReport(r)
+		}
+		return r
+	}
 
-	eg, egCtx := errgroup.WithContext(ctx)
+	srcErr := func(err error) error {
+		if stopped.Load() {
+			return nil
+		}
+		return sourceError(ctx, err)
+	}
+
+	eg, egCtx := errgroup.WithContext(runCtx)
 	eg.Go(func() error {
-		return m.leftSource.ProcessSource(egCtx, processMemVerify(getVerifier, true, m.leftNamespacesMap, m.projection))
+		return srcErr(m.leftSource.ProcessSource(egCtx, processMemVerify(getVerifier, true, m.leftNamespacesMap, m.projection)))
 	})
 	eg.Go(func() error {
-		return m.rightSource.ProcessSource(egCtx, processMemVerify(getVerifier, false, m.rightNamespacesMap, m.projection))
+		return srcErr(m.rightSource.ProcessSource(egCtx, processMemVerify(getVerifier, false, m.rightNamespacesMap, m.projection)))
 	})
 	eg.Go(func() error {
-		ticker := time.NewTicker(time.Second)
+		if !m.leftSource.WaitForInitialSync(egCtx) || !m.rightSource.WaitForInitialSync(egCtx) {
+			return nil
+		}
+		if m.once {
+			select {
+			case <-after(m.latency + poll):
+			case <-egCtx.Done():
+				return nil
+			}
+			if egCtx.Err() != nil {
+				return nil
+			}
+			mut.RLock()
+			for _, verifier := range verifiers {
+				verifier.Update(m.latency, 0)
+			}
+			mut.RUnlock()
+			takeReport()
+			stopped.Store(true)
+			cancel()
+			return nil
+		}
+		ticker := time.NewTicker(poll)
 		defer ticker.Stop()
-		m.leftSource.WaitForInitialSync()
-		m.rightSource.WaitForInitialSync()
 		for {
 			select {
 			case <-ticker.C:
-				found := false
-				var totalMismatches, totalCount int64
-				mut.RLock()
-				for ns, verifier := range verifiers {
-					mismatches, total := verifier.MismatchCountAndTotal()
-					if mismatches > 0 {
-						found = true
-						slog.Info("Verifying", "namespace", ns, "mismatches", mismatches, "count", total, "ids", verifier.Find(m.limit))
-					}
-					totalMismatches += mismatches
-					totalCount += total
+				if egCtx.Err() != nil {
+					return nil
 				}
-				mut.RUnlock()
-				slog.Info("Verifying", "ok", !found, "mismatches", totalMismatches, "count", totalCount)
+				takeReport()
 				ticker.Reset(m.cooldown)
 			case <-egCtx.Done():
 				return nil
@@ -373,7 +518,10 @@ func (m *memVerify) Run(ctx context.Context) error {
 		}
 	})
 
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+	return last.verdict()
 }
 
 type tailVerify struct {
@@ -385,6 +533,8 @@ type tailVerify struct {
 	cooldown           time.Duration
 	latency            time.Duration
 	projection         map[string]interface{}
+	poll               time.Duration
+	onReport           func(*report)
 }
 
 type SimpleTailDiffer struct {
@@ -463,11 +613,10 @@ func processTail(std *SimpleTailDiffer, namespaceMap map[string]string, projecti
 			Type:  update.ID[0].Type,
 			Value: bytes.Clone(update.ID[0].Value),
 		}
-		hasher.Reset()
-		if _, err := hasher.Write(update.ID[0].Value); err != nil {
+		idHash, err := hashKey(hasher, update.ID)
+		if err != nil {
 			return err
 		}
-		idHash := hasher.Sum64()
 		namespace := util.MapNamespace(namespaceMap, update.Namespace, ".", ":")
 		id := NamespacedID{namespace, innerIDCopy}
 		if update.Data == nil {
@@ -492,25 +641,33 @@ type tailDiff struct {
 }
 
 func (v *tailVerify) Run(ctx context.Context) error {
+	poll := v.poll
+	if poll <= 0 {
+		poll = verifierPoll
+	}
+	var last *report
 	std := &SimpleTailDiffer{m: map[uint64]tailDiff{}}
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
 		v.leftSource.skipInitialSync = true
-		return v.leftSource.ProcessSource(egCtx, processTail(std, v.leftNamespacesMap, v.projection, true))
+		return sourceError(ctx, v.leftSource.ProcessSource(egCtx, processTail(std, v.leftNamespacesMap, v.projection, true)))
 	})
 	eg.Go(func() error {
 		v.rightSource.skipInitialSync = true
-		return v.rightSource.ProcessSource(egCtx, processTail(std, v.rightNamespacesMap, v.projection, false))
+		return sourceError(ctx, v.rightSource.ProcessSource(egCtx, processTail(std, v.rightNamespacesMap, v.projection, false)))
 	})
 	eg.Go(func() error {
 		cumulativeTotal := 0
 		cumulativeDiff := 0
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(poll)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
+				if egCtx.Err() != nil {
+					return nil
+				}
 				diffs := 0
 				items := std.GetAndClean(time.Now().Add(-v.latency))
 				for _, item := range items {
@@ -524,6 +681,10 @@ func (v *tailVerify) Run(ctx context.Context) error {
 				}
 				cumulativeTotal += len(items)
 				slog.Info("Total diffs", "diffs", diffs, "total_checked", len(items), "cumulative_diffs", cumulativeDiff, "cumulative_total", cumulativeTotal)
+				last = &report{mismatches: int64(cumulativeDiff), total: int64(cumulativeTotal)}
+				if v.onReport != nil {
+					v.onReport(last)
+				}
 				ticker.Reset(v.cooldown)
 			case <-egCtx.Done():
 				return nil
@@ -531,7 +692,10 @@ func (v *tailVerify) Run(ctx context.Context) error {
 		}
 	})
 
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+	return last.verdict()
 }
 
 func runVerify(c *cli.Context) error {
@@ -546,6 +710,10 @@ func runVerify(c *cli.Context) error {
 	}
 	if partition >= totalPartitions || partition < 0 {
 		return fmt.Errorf("invalid partition")
+	}
+	once := c.Bool("once")
+	if err := checkVerifyFlags(once, c.Bool("simple"), c.Duration("latency")); err != nil {
+		return err
 	}
 	logger.Setup(logger.Options{Verbosity: c.String("verbosity")})
 	namespaces := c.StringSlice("namespaces")
@@ -566,39 +734,66 @@ func runVerify(c *cli.Context) error {
 	leftNamespacesMap := util.Mapify(leftNamespaces, namespaces)
 	rightNamespacesMap := util.Mapify(rightNamespaces, namespaces)
 
-	ctx := c.Context
+	ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	left, right, _, err := options.ConfigureConnectors(c.Args().Slice(), options.AdditionalSettings{})
 	if err != nil {
 		return err
 	}
-	leftC := left.Remote
-	rightC := right.Remote
-	if left.Local != nil {
-		leftC = connClient(left.Local)
-	}
-	if right.Local != nil {
-		rightC = connClient(right.Local)
-	}
+	defer options.TeardownConnector(left)
+	defer options.TeardownConnector(right)
+	return runThenDropReplication(ctx, func(ctx context.Context) error {
+		leftC := left.Remote
+		rightC := right.Remote
+		if left.Local != nil {
+			leftC = connClient(left.Local)
+		}
+		if right.Local != nil {
+			rightC = connClient(right.Local)
+		}
 
-	leftSource := source{
-		c:               leftC,
-		namespaces:      leftNamespaces,
-		parallelism:     parallelism,
-		initialSyncDone: make(chan struct{}),
-		partition:       partition,
-		totalPartitions: totalPartitions,
-	}
-	rightSource := source{
-		c:               rightC,
-		namespaces:      rightNamespaces,
-		parallelism:     parallelism,
-		initialSyncDone: make(chan struct{}),
-		partition:       partition,
-		totalPartitions: totalPartitions,
-	}
+		leftSource := source{
+			c:               leftC,
+			namespaces:      leftNamespaces,
+			parallelism:     parallelism,
+			initialSyncDone: make(chan struct{}),
+			partition:       partition,
+			totalPartitions: totalPartitions,
+		}
+		rightSource := source{
+			c:               rightC,
+			namespaces:      rightNamespaces,
+			parallelism:     parallelism,
+			initialSyncDone: make(chan struct{}),
+			partition:       partition,
+			totalPartitions: totalPartitions,
+		}
 
-	if simple {
-		tv := tailVerify{
+		if simple {
+			tv := tailVerify{
+				leftSource:         leftSource,
+				rightSource:        rightSource,
+				leftNamespacesMap:  leftNamespacesMap,
+				rightNamespacesMap: rightNamespacesMap,
+				limit:              limit,
+				cooldown:           cooldown,
+				latency:            latency,
+				projection:         projectionMap,
+			}
+
+			if err := tv.Run(ctx); err != nil {
+				slog.Error("Failed", "err", err)
+				return err
+			}
+
+			return nil
+		}
+
+		mv := memVerify{
 			leftSource:         leftSource,
 			rightSource:        rightSource,
 			leftNamespacesMap:  leftNamespacesMap,
@@ -607,30 +802,41 @@ func runVerify(c *cli.Context) error {
 			cooldown:           cooldown,
 			latency:            latency,
 			projection:         projectionMap,
+			once:               once,
 		}
 
-		if err := tv.Run(ctx); err != nil {
+		if err := mv.Run(ctx); err != nil {
 			slog.Error("Failed", "err", err)
 			return err
 		}
-
 		return nil
-	}
+	}, replicationDroppers(left, right)...)
+}
 
-	mv := memVerify{
-		leftSource:         leftSource,
-		rightSource:        rightSource,
-		leftNamespacesMap:  leftNamespacesMap,
-		rightNamespacesMap: rightNamespacesMap,
-		limit:              limit,
-		cooldown:           cooldown,
-		latency:            latency,
-		projection:         projectionMap,
-	}
+type replicationDropper interface {
+	DropReplication(context.Context) error
+}
 
-	if err := mv.Run(ctx); err != nil {
-		slog.Error("Failed", "err", err)
-		return err
+func replicationDroppers(connectors ...options.ConfiguredConnector) []replicationDropper {
+	var droppers []replicationDropper
+	for _, cc := range connectors {
+		if d, ok := cc.Local.(replicationDropper); ok {
+			droppers = append(droppers, d)
+		}
 	}
-	return nil
+	return droppers
+}
+
+const dropReplicationTimeout = 30 * time.Second
+
+func runThenDropReplication(ctx context.Context, run func(context.Context) error, droppers ...replicationDropper) error {
+	err := run(ctx)
+	dropCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dropReplicationTimeout)
+	defer cancel()
+	for _, d := range droppers {
+		if dropErr := d.DropReplication(dropCtx); dropErr != nil {
+			slog.Error("Failed to drop the replication slot or publication created by verify; drop them by hand", "err", dropErr)
+		}
+	}
+	return err
 }

@@ -91,7 +91,7 @@ type teardownable interface {
 	Teardown()
 }
 
-func teardownConnector(cc ConfiguredConnector) {
+func TeardownConnector(cc ConfiguredConnector) {
 	if t, ok := cc.Local.(teardownable); ok {
 		t.Teardown()
 	}
@@ -156,7 +156,7 @@ func ConfigureConnectors(args []string, additionalSettings AdditionalSettings) (
 	}
 
 	if len(dstArgs) < 1 {
-		teardownConnector(src)
+		TeardownConnector(src)
 		return src, dst, nil, fmt.Errorf("missing destination: %w", ErrMissingConnector)
 	}
 	var restArgs []string
@@ -164,12 +164,12 @@ func ConfigureConnectors(args []string, additionalSettings AdditionalSettings) (
 		if registeredConnector.IsConnector(dstArgs[0]) {
 			if registeredConnector.Create != nil {
 				if dst.Local, restArgs, err = registeredConnector.Create(dstArgs, additionalSettings); err != nil {
-					teardownConnector(src)
+					TeardownConnector(src)
 					return src, dst, nil, err
 				}
 			} else {
 				if dst.Remote, restArgs, err = registeredConnector.CreateRemote(dstArgs, additionalSettings); err != nil {
-					teardownConnector(src)
+					TeardownConnector(src)
 					return src, dst, nil, err
 				}
 			}
@@ -180,12 +180,12 @@ func ConfigureConnectors(args []string, additionalSettings AdditionalSettings) (
 			} else {
 				_, _, err = registeredConnector.CreateRemote([]string{dstArgs[0], "help"}, additionalSettings)
 			}
-			teardownConnector(src)
+			TeardownConnector(src)
 			return src, dst, nil, err
 		}
 	}
 	if dst.Local == nil && dst.Remote == nil {
-		teardownConnector(src)
+		TeardownConnector(src)
 		return src, dst, nil, fmt.Errorf("unsupported destination: %w", ErrMissingConnector)
 	}
 	return src, dst, restArgs, nil
@@ -867,7 +867,7 @@ Source:
 
    Initial sync is split into tasks by Bernoulli sampling based on 1 / doc-partition.
 
-   Change streams are powered by logical replication. Ensure that the postgres instance has been configured with 'wal_level=logical'. It should have the permissions to create replication slots and publications unless that is being managed externally via the --manual flag. Note that even though this connector may drop and create the replication slot and publication, you must still manually remove drop resources when you are done with dsync or postgres storage may grow. Also note that if you are running multiple instances for the same source, you will need to configure a different replication slot and/or publication for each one.
+   Change streams are powered by logical replication. Ensure that the postgres instance has been configured with 'wal_level=logical'. It should have the permissions to create replication slots and publications unless that is being managed externally via the --manual flag. Note that even though this connector may drop and create the replication slot and publication, you must still manually drop them when you are done with a dsync sync or postgres storage may grow; dsync verify drops the ones it created when it exits. Also note that if you are running multiple instances for the same source, you will need to configure a different replication slot and/or publication for each one.
 
    Currently, TOAST fields are not properly supported. Set the replica identity to full as a workaround.
 

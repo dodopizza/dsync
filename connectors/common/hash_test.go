@@ -90,3 +90,34 @@ func Test_HashBson(t *testing.T) {
 	// Sanity check an error case
 	assert.Error(t, common.HashBson(hasher, []byte{1, 2}, false, nil))
 }
+
+func Test_HashBsonCodeWithScope(t *testing.T) {
+	doc := func(code string, scope bson.D) []byte {
+		b, err := bson.Marshal(bson.D{{"k", bson.CodeWithScope{Code: bson.JavaScript(code), Scope: scope}}})
+		assert.NoError(t, err)
+		return b
+	}
+	nested := func(inner bson.D) bson.D { return bson.D{{"bb", int32(1)}, {"a", inner}} }
+	hasher := xxhash.New()
+
+	assert.True(t, compareHash(t, hasher, doc("f()", bson.D{{"bb", int32(1)}, {"a", int32(2)}}), doc("f()", bson.D{{"a", int32(2)}, {"bb", int32(1)}}), nil))
+	assert.True(t, compareHash(t, hasher, doc("f()", nested(bson.D{{"y", int32(1)}, {"x", int32(2)}})), doc("f()", bson.D{{"a", bson.D{{"x", int32(2)}, {"y", int32(1)}}}, {"bb", int32(1)}}), nil))
+	assert.False(t, compareHash(t, hasher, doc("//", bson.D{{"a", bson.D{}}}), doc("//a\x03a", bson.D{}), nil))
+	assert.False(t, compareHash(t, hasher, doc("f()", bson.D{{"a", int32(2)}}), doc("g()", bson.D{{"a", int32(2)}}), nil))
+	assert.False(t, compareHash(t, hasher, doc("f()", bson.D{{"a", int32(2)}}), doc("f()", bson.D{{"a", int32(3)}}), nil))
+}
+
+func Test_HashBsonCodeWithScopeMalformedReturnsError(t *testing.T) {
+	b := codeWithScopeDoc(t)
+	b[11] = 100
+
+	assert.NotPanics(t, func() {
+		assert.Error(t, common.HashBson(xxhash.New(), b, false, nil))
+	})
+}
+
+func codeWithScopeDoc(t *testing.T) []byte {
+	b, err := bson.Marshal(bson.D{{"k", bson.CodeWithScope{Code: "f()", Scope: bson.D{{"a", int32(1)}}}}})
+	assert.NoError(t, err)
+	return b
+}

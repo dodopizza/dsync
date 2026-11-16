@@ -74,6 +74,8 @@ type conn struct {
 
 	docs docState
 	now  func() time.Time
+
+	created createdReplication
 }
 
 type batchSender interface {
@@ -475,27 +477,35 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		sanitizedPublication := pgx.Identifier([]string{c.settings.PublicationName}).Sanitize()
 
 		if c.settings.Force {
-			if _, err := c.c.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %v", sanitizedPublication)); err != nil {
-				return nil, toConnectError(err)
-			}
-
-			createPublicationQ := fmt.Sprintf("CREATE PUBLICATION %v FOR TABLE %v;", sanitizedPublication, strings.Join(sanitizedNamespaces, ", "))
-			if _, err := c.c.Exec(ctx, createPublicationQ); err != nil {
-				return nil, toConnectError(err)
-			}
-
-			var count int
-			if err := c.c.QueryRow(ctx, "SELECT COUNT(*) from pg_replication_slots WHERE slot_name=$1", c.settings.SlotName).Scan(&count); err != nil {
-				return nil, toConnectError(err)
-			}
-			if count > 0 {
-				if _, err := c.c.Exec(ctx, "SELECT pg_drop_replication_slot($1)", c.settings.SlotName); err != nil {
-					return nil, toConnectError(err)
+			err := c.created.create(func(markPublication, markSlot func()) error {
+				if _, err := c.c.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %v", sanitizedPublication)); err != nil {
+					return toConnectError(err)
 				}
-			}
 
-			if _, err := c.c.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", c.settings.SlotName); err != nil {
-				return nil, toConnectError(err)
+				markPublication()
+				createPublicationQ := fmt.Sprintf("CREATE PUBLICATION %v FOR TABLE %v;", sanitizedPublication, strings.Join(sanitizedNamespaces, ", "))
+				if _, err := c.c.Exec(ctx, createPublicationQ); err != nil {
+					return toConnectError(err)
+				}
+
+				var count int
+				if err := c.c.QueryRow(ctx, "SELECT COUNT(*) from pg_replication_slots WHERE slot_name=$1", c.settings.SlotName).Scan(&count); err != nil {
+					return toConnectError(err)
+				}
+				if count > 0 {
+					if _, err := c.c.Exec(ctx, "SELECT pg_drop_replication_slot($1)", c.settings.SlotName); err != nil {
+						return toConnectError(err)
+					}
+				}
+
+				markSlot()
+				if _, err := c.c.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", c.settings.SlotName); err != nil {
+					return toConnectError(err)
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, err
 			}
 		}
 
@@ -616,41 +626,20 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 		where = " WHERE "
 	}
 
-	q := fmt.Sprintf("SELECT * from %v%v%v ORDER BY %v LIMIT %v", SanitizeNamespace(namespace), where, strings.Join(whereQueries, " AND "), primaryKeysPartial, limit+1)
-	rows, err := c.c.Query(ctx, q, args...)
+	rows, err := c.listRows(ctx, namespace, keys, where+strings.Join(whereQueries, " AND "), args, limit)
 	if err != nil {
-		return nil, toConnectError(err)
-	}
-	ms, err := pgx.CollectRows(rows, pgx.RowToMap)
-	if err != nil {
-		return nil, toConnectError(err)
+		return nil, err
 	}
 
 	var data [][]byte
-
-	for i, m := range ms {
-		if i >= limit {
-			break
-		}
-		if err := c.prepareSourceDocument(namespace, m); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		marshalled, err := marshalWithRegistry(c.bsonRegistry, m)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		data = append(data, marshalled)
+	for _, row := range rows[:min(len(rows), limit)] {
+		data = append(data, row.doc)
 	}
 
 	var nextCursor []byte
-	if len(ms) > limit {
-		last := ms[limit]
-
+	if len(rows) > limit {
 		next := *cursor
-		next.Low = nil
-		for _, k := range keys {
-			next.Low = append(next.Low, last[k])
-		}
+		next.Low = rows[limit].key
 		nextCursor, err = next.Encode()
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("error encoding next cursor"))
@@ -752,6 +741,9 @@ func (c *conn) prepareSourceDocument(namespace string, values map[string]interfa
 }
 
 func (c *conn) toBsonAdiomUpdate(update pglib.Update) (*adiomv1.Update, error) {
+	if c.settings.DocumentMode {
+		return docSourceUpdate(update)
+	}
 	ns := update.Namespace + "." + update.TableName
 	switch update.Type {
 	case pglib.UpdateTypeInsert:

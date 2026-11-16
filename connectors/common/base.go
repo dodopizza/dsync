@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
@@ -194,6 +195,20 @@ func HashBson(hasher hash.Hash64, b bson.Raw, arr bool, projection map[string]in
 				return err
 			}
 			if err := HashBson(hasher, bson.Raw(v.Array()), true, innerProjection); err != nil {
+				return err
+			}
+		} else if v.Type == bson.TypeCodeWithScope {
+			code, scope, ok := v.CodeWithScopeOK()
+			if !ok {
+				return fmt.Errorf("malformed code with scope value")
+			}
+			if _, err := hasher.Write(binary.LittleEndian.AppendUint32(nil, uint32(len(code)))); err != nil {
+				return err
+			}
+			if _, err := hasher.Write([]byte(code)); err != nil {
+				return err
+			}
+			if err := HashBson(hasher, scope, false, nil); err != nil {
 				return err
 			}
 		} else {

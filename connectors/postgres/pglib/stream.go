@@ -95,8 +95,8 @@ type Update struct {
 }
 
 // UpdateBatch contains all row changes committed by a transaction and the LSN
-// that is safe to resume from. Updates may be empty (for example, TRUNCATE is
-// not representable as a row update), but the commit LSN is still meaningful.
+// that is safe to resume from. Updates may be empty, but the commit LSN is
+// still meaningful.
 type UpdateBatch struct {
 	Updates []Update
 	LSN     uint64
@@ -279,76 +279,96 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- UpdateBatch) error {
 			if xld.ServerWALEnd > state.latestLSN {
 				state.latestLSN = xld.ServerWALEnd
 			}
-			switch logicalMsg := logicalMsg.(type) {
-			case *pglogrepl.RelationMessageV2:
-				state.relations[logicalMsg.RelationID] = logicalMsg
-			case *pglogrepl.BeginMessage:
-				state.currentLSN = logicalMsg.FinalLSN
-			case *pglogrepl.CommitMessage:
-				select {
-				case ch <- UpdateBatch{Updates: state.updates, LSN: uint64(state.currentLSN)}:
-				case <-ctx.Done():
-					return nil
-				}
-				state.updates = nil
-				fh.Add(state.currentLSN)
-			case *pglogrepl.InsertMessageV2:
-				ns, table, values, err := decodeToMap(state, logicalMsg.RelationID, logicalMsg.Tuple.Columns)
-				if err != nil {
-					return err
-				}
-				state.updates = append(state.updates, Update{
-					Namespace: ns,
-					TableName: table,
-					New:       values,
-					Type:      UpdateTypeInsert,
-					LSN:       uint64(state.currentLSN),
-				})
-			case *pglogrepl.UpdateMessageV2:
-				ns, table, values, err := decodeToMap(state, logicalMsg.RelationID, logicalMsg.NewTuple.Columns)
-				if err != nil {
-					return err
-				}
-				var oldValues map[string]interface{}
-				if logicalMsg.OldTuple != nil {
-					_, _, oldValues, err = decodeToMap(state, logicalMsg.RelationID, logicalMsg.OldTuple.Columns)
-					if err != nil {
-						return err
-					}
-					// With REPLICA IDENTITY FULL, the old tuple supplies values
-					// represented as unchanged TOAST markers in the new tuple.
-					fillUnchangedValues(values, oldValues)
-				}
-				if columns := unchangedToastColumns(values); len(columns) > 0 {
-					return fmt.Errorf("update to %s.%s contains unchanged TOAST columns %v; set REPLICA IDENTITY FULL", ns, table, columns)
-				}
-				state.updates = append(state.updates, Update{
-					Namespace: ns,
-					TableName: table,
-					Old:       oldValues,
-					New:       values,
-					Type:      UpdateTypeUpdate,
-					LSN:       uint64(state.currentLSN),
-				})
-			case *pglogrepl.DeleteMessageV2:
-				ns, table, values, err := decodeToMap(state, logicalMsg.RelationID, logicalMsg.OldTuple.Columns)
-				if err != nil {
-					return err
-				}
-				state.updates = append(state.updates, Update{
-					Namespace: ns,
-					TableName: table,
-					Old:       values,
-					Type:      UpdateTypeDelete,
-					LSN:       uint64(state.currentLSN),
-				})
-			case *pglogrepl.StreamStartMessageV2:
-				state.inStream = true
-			case *pglogrepl.StreamStopMessageV2:
-				state.inStream = false
+			if err := handleLogical(ctx, state, &fh, ch, logicalMsg); err != nil {
+				return err
 			}
 		}
 	}
+}
+func handleLogical(ctx context.Context, state *replState, fh *flushHelper, ch chan<- UpdateBatch, msg pglogrepl.Message) error {
+	switch logicalMsg := msg.(type) {
+	case *pglogrepl.RelationMessageV2:
+		state.relations[logicalMsg.RelationID] = logicalMsg
+	case *pglogrepl.BeginMessage:
+		state.currentLSN = logicalMsg.FinalLSN
+	case *pglogrepl.CommitMessage:
+		select {
+		case ch <- UpdateBatch{Updates: state.updates, LSN: uint64(state.currentLSN)}:
+		case <-ctx.Done():
+			return nil
+		}
+		state.updates = nil
+		fh.Add(state.currentLSN)
+	case *pglogrepl.InsertMessageV2:
+		ns, table, values, err := decodeToMap(state, logicalMsg.RelationID, logicalMsg.Tuple.Columns)
+		if err != nil {
+			return err
+		}
+		state.updates = append(state.updates, Update{
+			Namespace: ns,
+			TableName: table,
+			New:       values,
+			Type:      UpdateTypeInsert,
+			LSN:       uint64(state.currentLSN),
+		})
+	case *pglogrepl.UpdateMessageV2:
+		ns, table, values, err := decodeToMap(state, logicalMsg.RelationID, logicalMsg.NewTuple.Columns)
+		if err != nil {
+			return err
+		}
+		var oldValues map[string]any
+		if logicalMsg.OldTuple != nil {
+			_, _, oldValues, err = decodeToMap(state, logicalMsg.RelationID, logicalMsg.OldTuple.Columns)
+			if err != nil {
+				return err
+			}
+			// With REPLICA IDENTITY FULL, the old tuple supplies values
+			// represented as unchanged TOAST markers in the new tuple.
+			fillUnchangedValues(values, oldValues)
+		}
+		if columns := unchangedToastColumns(values); len(columns) > 0 {
+			return fmt.Errorf("update to %s.%s contains unchanged TOAST columns %v; set REPLICA IDENTITY FULL", ns, table, columns)
+		}
+		state.updates = append(state.updates, Update{
+			Namespace: ns,
+			TableName: table,
+			Old:       oldValues,
+			New:       values,
+			Type:      UpdateTypeUpdate,
+			LSN:       uint64(state.currentLSN),
+		})
+	case *pglogrepl.DeleteMessageV2:
+		ns, table, values, err := decodeToMap(state, logicalMsg.RelationID, logicalMsg.OldTuple.Columns)
+		if err != nil {
+			return err
+		}
+		state.updates = append(state.updates, Update{
+			Namespace: ns,
+			TableName: table,
+			Old:       values,
+			Type:      UpdateTypeDelete,
+			LSN:       uint64(state.currentLSN),
+		})
+	case *pglogrepl.TruncateMessageV2:
+		return truncateError(state, logicalMsg.RelationIDs)
+	case *pglogrepl.StreamStartMessageV2:
+		state.inStream = true
+	case *pglogrepl.StreamStopMessageV2:
+		state.inStream = false
+	}
+	return nil
+}
+
+func truncateError(state *replState, relationIDs []uint32) error {
+	names := make([]string, len(relationIDs))
+	for i, id := range relationIDs {
+		if relation, ok := state.relations[id]; ok {
+			names[i] = relation.Namespace + "." + relation.RelationName
+		} else {
+			names[i] = fmt.Sprint(id)
+		}
+	}
+	return fmt.Errorf("TRUNCATE of %s is not supported", strings.Join(names, ", "))
 }
 
 func publicationNamesArg(name string) string {
