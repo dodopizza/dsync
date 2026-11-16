@@ -137,6 +137,40 @@ func TestDocumentModeServerErrorsNeverCarryDocumentValuesInErrorOrLogs(t *testin
 	assert.Contains(t, err.Error(), "22P02")
 	assert.NotContains(t, logs.String(), marker)
 	assert.NotEqual(t, connect.CodeUnavailable, connect.CodeOf(err))
+
+	f.exec(ctx, t, `CREATE TABLE %s.tags (id text PRIMARY KEY, doc jsonb NOT NULL, tag text UNIQUE)`, f.schema)
+	must(t, writeDocs(ctx, c, f.schema+".tags", rawDoc(t, bson.D{{Key: "_id", Value: int32(1)}, {Key: "tag", Value: marker}})), "first tag")
+	err = writeDocs(ctx, c, f.schema+".tags", rawDoc(t, bson.D{{Key: "_id", Value: int32(2)}, {Key: "tag", Value: marker}}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "document 0: constraint tags_tag_key: SQLSTATE 23505")
+	assert.NotContains(t, err.Error(), marker)
+	assert.NotContains(t, logs.String(), marker)
+}
+
+func TestDocumentModeClientEncodeFailuresClaimNoBatchPositionAndAreNotRetried(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n bigint)`, f.schema)
+	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
+	ns := f.schema + ".numbers"
+	doc := func(id int32, n any) []byte { return rawDoc(t, bson.D{{Key: "_id", Value: id}, {Key: "n", Value: n}}) }
+	insert := func(raw []byte) *adiomv1.Update { return upsertUpdate(adiomv1.UpdateType_UPDATE_TYPE_INSERT, nil, raw) }
+
+	failures := map[string]error{
+		"copy":   writeDocs(ctx, c, ns, doc(1, int32(1)), doc(2, int32(2)), doc(3, true)),
+		"update": writeUpdates(ctx, c, ns, insert(doc(1, int32(1))), insert(doc(2, int32(2))), insert(doc(3, true))),
+	}
+
+	for name, err := range failures {
+		require.Error(t, err, name)
+		assert.NotContains(t, err.Error(), "document 0", name)
+		assert.NotContains(t, err.Error(), "update 0", name)
+		assert.Contains(t, err.Error(), "write failed", name)
+		for _, retryable := range []connect.Code{connect.CodeAborted, connect.CodeResourceExhausted, connect.CodeUnavailable, connect.CodeDeadlineExceeded} {
+			assert.NotEqual(t, retryable, connect.CodeOf(err), name)
+		}
+	}
+	assert.Zero(t, countRows(ctx, t, f, "numbers"))
 }
 
 func TestDocumentModeParallelFirstWritesLoadTheShapeSafely(t *testing.T) {

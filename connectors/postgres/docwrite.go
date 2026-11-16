@@ -293,11 +293,14 @@ func positionedWriteError(label string, index int, err error) error {
 		position = fmt.Sprintf("%s %d", label, index)
 	}
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
-		column := ""
+		detail := ""
 		if pgErr.ColumnName != "" {
-			column = ": column " + pgErr.ColumnName
+			detail += ": column " + pgErr.ColumnName
 		}
-		return connect.NewError(sqlStateCode(pgErr.Code), fmt.Errorf("%s%s: SQLSTATE %s", position, column, pgErr.Code))
+		if pgErr.ConstraintName != "" {
+			detail += ": constraint " + pgErr.ConstraintName
+		}
+		return connect.NewError(sqlStateCode(pgErr.Code), fmt.Errorf("%s%s: SQLSTATE %s", position, detail, pgErr.Code))
 	}
 	if code := connectCode(err); code != connect.CodeInternal {
 		return connect.NewError(code, err)
@@ -320,26 +323,40 @@ func (c *conn) writeDocuments(ctx context.Context, namespace string, data [][]by
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	if c.now != nil {
-		now = c.now()
-	}
-	now = now.UTC()
-	args, err := docBatchArgs(plan, data, now)
+	args, err := docBatchArgs(plan, data, c.clock())
 	if err != nil {
 		return err
 	}
+	statements := make([]docStatement, len(args))
+	for i, a := range args {
+		statements[i] = docStatement{query: plan.query, args: a, position: i}
+	}
+	return c.execDocStatements(ctx, "document", statements)
+}
+
+func (c *conn) clock() time.Time {
+	if c.now != nil {
+		return c.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (c *conn) execDocStatements(ctx context.Context, label string, statements []docStatement) error {
 	batch := &pgx.Batch{}
-	for _, a := range args {
-		batch.Queue(plan.query, a...)
+	for _, st := range statements {
+		batch.Queue(st.query, st.args...)
 	}
 	failedAt, failure := -1, error(nil)
-	err = c.execBatchWith(ctx, batch, func(i int, err error) { failedAt, failure = i, err }, func(error) {})
+	err := c.execBatchWith(ctx, batch, func(i int, err error) { failedAt, failure = i, err }, func(error) {})
 	if err == nil {
 		return nil
 	}
 	if failure == nil {
 		failure = err
 	}
-	return docWriteError(failedAt, failure)
+	position := -1
+	if _, wholeBatch := errors.AsType[pgx.ErrPreprocessingBatch](failure); !wholeBatch && failedAt >= 0 {
+		position = statements[failedAt].position
+	}
+	return positionedWriteError(label, position, failure)
 }

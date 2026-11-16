@@ -283,6 +283,9 @@ func TestDocWriteErrorKeepsPositionColumnAndSQLStateButNeverTheServerMessage(t *
 	assert.Contains(t, err.Error(), "22P02")
 	assert.NotContains(t, err.Error(), marker)
 
+	unique := docWriteError(2, &pgconn.PgError{Code: "23505", Message: marker, Detail: "Key (n)=(" + marker + ") already exists.", ConstraintName: "numbers_n_key", TableName: "numbers"})
+	assert.Equal(t, "internal: document 2: constraint numbers_n_key: SQLSTATE 23505", unique.Error())
+
 	clientErr := docWriteError(1, fmt.Errorf("unable to encode %s into binary format", marker))
 	assert.NotContains(t, clientErr.Error(), marker)
 	assert.Contains(t, clientErr.Error(), "document 1")

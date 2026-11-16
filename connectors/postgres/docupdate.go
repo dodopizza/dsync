@@ -11,7 +11,6 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/adiom-data/dsync/connectors/common"
-	"github.com/jackc/pgx/v5"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -173,28 +172,9 @@ func (c *conn) writeDocumentUpdates(ctx context.Context, namespace string, updat
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	if c.now != nil {
-		now = c.now()
-	}
-	statements, err := docUpdateStatements(plan, updates, now.UTC())
+	statements, err := docUpdateStatements(plan, updates, c.clock())
 	if err != nil || len(statements) == 0 {
 		return err
 	}
-	batch := &pgx.Batch{}
-	for _, st := range statements {
-		batch.Queue(st.query, st.args...)
-	}
-	failedAt, failure := -1, error(nil)
-	err = c.execBatchWith(ctx, batch, func(i int, err error) { failedAt, failure = i, err }, func(error) {})
-	if err == nil {
-		return nil
-	}
-	if failure == nil {
-		failure = err
-	}
-	if failedAt >= 0 {
-		failedAt = statements[failedAt].position
-	}
-	return positionedWriteError("update", failedAt, failure)
+	return c.execDocStatements(ctx, "update", statements)
 }
