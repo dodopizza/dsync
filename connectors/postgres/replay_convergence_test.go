@@ -24,7 +24,7 @@ func replayMetadata() sinkTableMetadata {
 	}
 }
 
-func replayQuery(t *testing.T, document map[string]interface{}) string {
+func replayQuery(t *testing.T, document map[string]any) string {
 	t.Helper()
 	metadata := replayMetadata()
 	op, err := planPostgresUpsert(metadata, document, 0)
@@ -33,7 +33,7 @@ func replayQuery(t *testing.T, document map[string]interface{}) string {
 }
 
 func TestColumnModeReplayedInsertUpdatesInsteadOfFailingOnDuplicateKey(t *testing.T) {
-	query := replayQuery(t, map[string]interface{}{"id": int32(1), "name": "a", "note": "n"})
+	query := replayQuery(t, map[string]any{"id": int32(1), "name": "a", "note": "n"})
 
 	assert.Contains(t, query, `ON CONFLICT ("id") DO UPDATE SET`)
 	assert.NotContains(t, query, "DO NOTHING")
@@ -47,15 +47,15 @@ func TestColumnModeKeyOnlyTableReplaysAsDoNothing(t *testing.T) {
 
 func TestColumnModeSubsetWriteConvergesOnTheSameRowForDeterministicDefaults(t *testing.T) {
 	const assignments = `DO UPDATE SET "name" = EXCLUDED."name", "note" = EXCLUDED."note", "status" = DEFAULT`
-	full := replayQuery(t, map[string]interface{}{"id": int32(1), "name": "a", "note": "n"})
-	subset := replayQuery(t, map[string]interface{}{"id": int32(1), "name": "b"})
+	full := replayQuery(t, map[string]any{"id": int32(1), "name": "a", "note": "n"})
+	subset := replayQuery(t, map[string]any{"id": int32(1), "name": "b"})
 
 	assert.Contains(t, full, assignments)
 	assert.Contains(t, subset, assignments)
 }
 
 func TestColumnModeOmittedDefaultColumnIsReevaluatedOnEveryReplayedWrite(t *testing.T) {
-	query := replayQuery(t, map[string]interface{}{"id": int32(1), "name": "b"})
+	query := replayQuery(t, map[string]any{"id": int32(1), "name": "b"})
 
 	assert.Contains(t, query, `"status" = DEFAULT`)
 	assert.NotContains(t, query, "IS DISTINCT FROM")
@@ -85,9 +85,9 @@ func TestColumnModeUpdateWindowForOneIDKeepsOrderKindsAndOverwritesTheKeyFromThe
 		assert.EqualValues(t, 1, op.values[0], "operation %d key", i)
 		assert.True(t, strings.HasPrefix(op.query("public.items", metadata.PrimaryKey), map[bool]string{true: "DELETE FROM", false: "INSERT INTO"}[op.delete]))
 	}
-	assert.Equal(t, []interface{}{"v1", "n"}, ops[0].values[1:])
-	assert.Equal(t, []interface{}{"v2", nil}, ops[1].values[1:])
-	assert.Equal(t, []interface{}{"v3", nil}, ops[7].values[1:])
+	assert.Equal(t, []any{"v1", "n"}, ops[0].values[1:])
+	assert.Equal(t, []any{"v2", nil}, ops[1].values[1:])
+	assert.Equal(t, []any{"v3", nil}, ops[7].values[1:])
 	assert.Len(t, ops[6].values, 1)
 }
 

@@ -84,23 +84,19 @@ func TestCursorNeverCoversATokenWhoseUpdatesAreNotSentYet(t *testing.T) {
 		awaitJoin(t, &wg)
 	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		errs <- sendWithCursor(sender, tokenMap, 1, locA, tokenA, func(cursor []byte) error {
 			close(inSend)
 			<-releaseSend
 			return record(cursor)
 		})
-	}()
+	})
 	awaitSignal(t, lock.waiting, "A to take the lock")
 	awaitSignal(t, inSend, "A to start sending")
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		errs <- sendWithCursor(sender, tokenMap, 1, locB, tokenB, record)
-	}()
+	})
 	awaitSignal(t, lock.waiting, "B to queue on the lock")
 
 	encoded, err := tokenMap.encodeMap()
@@ -145,26 +141,22 @@ func TestQueuedSendNeverCarriesATokenWhoseSendFailed(t *testing.T) {
 	aErr := make(chan error, 1)
 	bErr := make(chan error, 1)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		aErr <- sendWithCursor(sender, tokenMap, 1, locA, tokenA, func([]byte) error {
 			close(inSend)
 			<-failSend
 			return errSend
 		})
-	}()
+	})
 	awaitSignal(t, lock.waiting, "A to take the lock")
 	awaitSignal(t, inSend, "A to start sending")
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		bErr <- sendWithCursor(sender, tokenMap, 1, locB, tokenB, func(cursor []byte) error {
 			bSent = append(bSent, cursor)
 			return nil
 		})
-	}()
+	})
 	awaitSignal(t, lock.waiting, "B to queue on the lock")
 
 	fail()

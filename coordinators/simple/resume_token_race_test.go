@@ -1,7 +1,6 @@
 package simple
 
 import (
-	"context"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -15,14 +14,14 @@ type marshalingStore struct {
 	*temp.StateStore
 }
 
-func (s marshalingStore) PersistObject(_ string, _ interface{}, obj interface{}) error {
+func (s marshalingStore) PersistObject(_ string, _ any, obj any) error {
 	_, err := json.Marshal(obj)
 	return err
 }
 
 func TestResumeTokenUpdateDoesNotRaceWithTaskDone(t *testing.T) {
 	c := NewSimpleCoordinator(1)
-	c.Setup(context.Background(), nil, marshalingStore{temp.NewTempStateStore()})
+	c.Setup(t.Context(), nil, marshalingStore{temp.NewTempStateStore()})
 	c.flows["f"] = &FlowDetails{
 		FlowID:    "f",
 		Options:   iface.FlowOptions{SrcId: "src", DstId: "dst"},
@@ -31,18 +30,15 @@ func TestResumeTokenUpdateDoesNotRaceWithTaskDone(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 200 {
 			require.NoError(t, c.NotifyTaskDone("f", "dst", 1, nil))
 		}
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		for range 200 {
 			require.NoError(t, c.UpdateCDCResumeToken("f", "dst", []byte("token")))
 		}
-	}()
+	})
 	wg.Wait()
 }

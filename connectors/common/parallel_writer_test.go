@@ -205,7 +205,7 @@ func pwUpdate(i int, ns int) iface.DataMessage {
 
 func pwUpdatesPerWorker() [][]iface.DataMessage {
 	out := make([][]iface.DataMessage, pwWorkers)
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		w := hashDataMsgId(pwUpdate(i, 0)) % pwWorkers
 		if len(out[w]) < 3 {
 			out[w] = append(out[w], pwUpdate(i, min(len(out[w]), 2)/2))
@@ -503,7 +503,7 @@ func pwShardedRowEvent(mutation uint, row int, withShardKey bool) iface.DataMess
 }
 
 func TestRowEventsWithDivergentIdShapesRouteToOneWorker(t *testing.T) {
-	for row := 0; row < 200; row++ {
+	for row := range 200 {
 		update := hashDataMsgId(pwShardedRowEvent(iface.MutationType_Update, row, true)) % pwWorkers
 		partial := hashDataMsgId(pwShardedRowEvent(iface.MutationType_Apply, row, false)) % pwWorkers
 		remove := hashDataMsgId(pwShardedRowEvent(iface.MutationType_Delete, row, true)) % pwWorkers
@@ -535,7 +535,7 @@ func TestIdsEqualInIdButDifferentInOtherPartsShareAWorker(t *testing.T) {
 
 func TestDifferentIdValuesSpreadAcrossWorkers(t *testing.T) {
 	workers := map[int]bool{}
-	for row := 0; row < 200; row++ {
+	for row := range 200 {
 		workers[hashDataMsgId(pwShardedRowEvent(iface.MutationType_Update, row, true))%pwWorkers] = true
 	}
 	assert.Len(t, workers, pwWorkers)
