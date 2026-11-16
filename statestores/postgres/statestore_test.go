@@ -64,14 +64,14 @@ func newStore(t *testing.T, q querier) *StateStore {
 type planLike struct {
 	Token []byte
 	Count int64
-	Low   interface{}
-	High  interface{}
+	Low   any
+	High  any
 	Tasks []taskLike
 }
 
 type taskLike struct {
 	Id  int64
-	Def struct{ Low, High interface{} }
+	Def struct{ Low, High any }
 }
 
 func TestRoundTripKeepsBSONTypesOfInterfaceFields(t *testing.T) {
@@ -102,7 +102,7 @@ func TestRoundTripDecodesEmbeddedDocumentsAsBsonM(t *testing.T) {
 	data, err := bson.Marshal(bson.M{"Low": bson.M{"a": int64(1)}})
 	require.NoError(t, err)
 	s := newStore(t, &fakeQuerier{row: func(int) fakeRow { return fakeRow{data: data} }})
-	var out struct{ Low interface{} }
+	var out struct{ Low any }
 
 	require.NoError(t, s.RetrieveObject("flows", "f1", &out))
 
@@ -295,7 +295,7 @@ func TestNonStringIDsAreRejectedAndFlowIDIsAccepted(t *testing.T) {
 	s := newStore(t, q)
 	q.calls = nil
 
-	for _, id := range []interface{}{1, int64(1), nil, []byte("1"), struct{}{}} {
+	for _, id := range []any{1, int64(1), nil, []byte("1"), struct{}{}} {
 		assert.Error(t, s.PersistObject("flows", id, bson.M{}), "%T", id)
 		assert.Error(t, s.RetrieveObject("flows", id, &bson.M{}), "%T", id)
 		assert.Error(t, s.DeleteObject("flows", id), "%T", id)

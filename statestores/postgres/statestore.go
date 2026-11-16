@@ -49,7 +49,7 @@ type StateStore struct {
 
 func NewPostgresStateStore(settings StateStoreSettings) *StateStore {
 	registry := bson.NewRegistry()
-	registry.RegisterTypeMapEntry(bson.TypeEmbeddedDocument, reflect.TypeOf(bson.M{}))
+	registry.RegisterTypeMapEntry(bson.TypeEmbeddedDocument, reflect.TypeFor[bson.M]())
 	return &StateStore{settings: settings, attemptTimeout: 30 * time.Second, open: openPool, registry: registry}
 }
 
@@ -121,7 +121,7 @@ func (s *StateStore) withRetry(op func(ctx context.Context) error) error {
 	return sanitize(err)
 }
 
-func idKey(id interface{}) (string, error) {
+func idKey(id any) (string, error) {
 	v := reflect.ValueOf(id)
 	if v.Kind() != reflect.String {
 		return "", errors.New("state object id must be a string")
@@ -129,7 +129,7 @@ func idKey(id interface{}) (string, error) {
 	return v.String(), nil
 }
 
-func (s *StateStore) PersistObject(storeName string, id interface{}, obj interface{}) error {
+func (s *StateStore) PersistObject(storeName string, id any, obj any) error {
 	key, err := idKey(id)
 	if err != nil {
 		return err
@@ -144,7 +144,7 @@ func (s *StateStore) PersistObject(storeName string, id interface{}, obj interfa
 	})
 }
 
-func (s *StateStore) RetrieveObject(storeName string, id interface{}, obj interface{}) error {
+func (s *StateStore) RetrieveObject(storeName string, id any, obj any) error {
 	key, err := idKey(id)
 	if err != nil {
 		return err
@@ -167,7 +167,7 @@ func (s *StateStore) RetrieveObject(storeName string, id interface{}, obj interf
 	return nil
 }
 
-func (s *StateStore) DeleteObject(storeName string, id interface{}) error {
+func (s *StateStore) DeleteObject(storeName string, id any) error {
 	key, err := idKey(id)
 	if err != nil {
 		return err
