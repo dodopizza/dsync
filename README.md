@@ -92,6 +92,13 @@ Limits:
 * If a key column value changes at the source, the old row stays and a new one is written.
 * The source must send an id part named `_id` (or a single unnamed id part). Sources whose id parts are named after other columns, such as the SQL batch connector, cannot feed this mode.
 
+### Replay after restart
+
+After a restart the transfer resumes from the last checkpoint, so writes made after it are applied again.
+* Column mode rewrites every writable non-key column on each applied write; identity and generated columns keep their value. A column omitted from a message gets its default again, or NULL when it is nullable and has no default. Sequence or time defaults produce a new value on each replay.
+* Document mode without `--updated-at-field` leaves the `--updated-at-column` value at the replay time whenever the replayed window holds more than one version of a document, the newest included. With `--updated-at-field`, the value comes from the document when that field holds a date; a missing or null field falls back to the write time, and a non-date value fails the write.
+* A value moved from one row to another under a secondary UNIQUE constraint inside the replayed window can fail the replay with SQLSTATE 23505.
+
 # Quickstart
 Follow these simple instructions to get dsync up and running and perform a migration from our Cosmos DB demo instance to your MongoDB destination.
 

@@ -1066,17 +1066,20 @@ func buildDeleteQuery(namespace string, pkeys []string) string {
 	return fmt.Sprintf("DELETE FROM %s WHERE %s", SanitizeNamespace(namespace), strings.Join(whereClauses, " AND "))
 }
 
+func (o postgresWriteOperation) query(namespace string, pkeys []string) string {
+	if o.delete {
+		return buildDeleteQuery(namespace, pkeys)
+	}
+	return buildUpsertQuery(namespace, pkeys, o.columns, o.defaultColumns, o.overrideIdentity)
+}
+
 func (c *conn) executePostgresWrites(ctx context.Context, namespace string, pkeys []string, operations []postgresWriteOperation) error {
 	if len(operations) == 0 {
 		return nil
 	}
 	batch := &pgx.Batch{}
 	for _, operation := range operations {
-		if operation.delete {
-			batch.Queue(buildDeleteQuery(namespace, pkeys), operation.values...)
-			continue
-		}
-		batch.Queue(buildUpsertQuery(namespace, pkeys, operation.columns, operation.defaultColumns, operation.overrideIdentity), operation.values...)
+		batch.Queue(operation.query(namespace, pkeys), operation.values...)
 	}
 	return c.sendSinkBatch(ctx, batch, len(operations), func(i int, err error) {
 		if errors.Is(err, context.Canceled) {
@@ -1193,6 +1196,45 @@ func fromMongoID(reg *bson.Registry, id []*adiomv1.BsonValue, primaryKeys []stri
 	return []interface{}{value}, nil
 }
 
+func planPostgresUpdates(reg *bson.Registry, metadata sinkTableMetadata, hasID bool, updates []*adiomv1.Update) ([]postgresWriteOperation, error) {
+	operations := make([]postgresWriteOperation, 0, len(updates))
+	for i, update := range updates {
+		if update.GetType() == adiomv1.UpdateType_UPDATE_TYPE_UNKNOWN {
+			continue
+		}
+		pkValues, err := fromMongoID(reg, update.GetId(), metadata.PrimaryKey)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: failed to extract primary key: %w", i, err))
+		}
+		if len(pkValues) != len(metadata.PrimaryKey) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: primary key length mismatch: expected %d, got %d", i, len(metadata.PrimaryKey), len(pkValues)))
+		}
+		switch update.GetType() {
+		case adiomv1.UpdateType_UPDATE_TYPE_INSERT, adiomv1.UpdateType_UPDATE_TYPE_UPDATE:
+			document, err := bsonToMap(reg, update.GetData(), hasID)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					slog.Error("Failed to unmarshal BSON update", "index", i, "error", err)
+				}
+				return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("decode update %d: %w", i, err))
+			}
+			for keyIndex, key := range metadata.PrimaryKey {
+				document[key] = pkValues[keyIndex]
+			}
+			operation, err := planPostgresUpsert(metadata, document, i)
+			if err != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: %w", i, err))
+			}
+			operations = append(operations, operation)
+		case adiomv1.UpdateType_UPDATE_TYPE_DELETE:
+			operations = append(operations, postgresWriteOperation{delete: true, values: pkValues, requestIndex: i})
+		default:
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: unsupported update type: %v", i, update.GetType()))
+		}
+	}
+	return operations, nil
+}
+
 // WriteUpdates implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.WriteUpdatesRequest]) (*connect.Response[adiomv1.WriteUpdatesResponse], error) {
 	if r.Msg.GetPartialWriteResults() {
@@ -1215,40 +1257,9 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		}
 	}
 
-	operations := make([]postgresWriteOperation, 0, len(r.Msg.GetUpdates()))
-	for i, update := range r.Msg.GetUpdates() {
-		if update.GetType() == adiomv1.UpdateType_UPDATE_TYPE_UNKNOWN {
-			continue
-		}
-		pkValues, err := fromMongoID(c.bsonRegistry, update.GetId(), metadata.PrimaryKey)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: failed to extract primary key: %w", i, err))
-		}
-		if len(pkValues) != len(metadata.PrimaryKey) {
-			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: primary key length mismatch: expected %d, got %d", i, len(metadata.PrimaryKey), len(pkValues)))
-		}
-		switch update.GetType() {
-		case adiomv1.UpdateType_UPDATE_TYPE_INSERT, adiomv1.UpdateType_UPDATE_TYPE_UPDATE:
-			document, err := bsonToMap(c.bsonRegistry, update.GetData(), c.hasIDColumn[namespace])
-			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					slog.Error("Failed to unmarshal BSON update", "index", i, "error", err)
-				}
-				return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("decode update %d: %w", i, err))
-			}
-			for keyIndex, key := range metadata.PrimaryKey {
-				document[key] = pkValues[keyIndex]
-			}
-			operation, err := planPostgresUpsert(metadata, document, i)
-			if err != nil {
-				return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: %w", i, err))
-			}
-			operations = append(operations, operation)
-		case adiomv1.UpdateType_UPDATE_TYPE_DELETE:
-			operations = append(operations, postgresWriteOperation{delete: true, values: pkValues, requestIndex: i})
-		default:
-			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("update %d: unsupported update type: %v", i, update.GetType()))
-		}
+	operations, err := planPostgresUpdates(c.bsonRegistry, metadata, c.hasIDColumn[namespace], r.Msg.GetUpdates())
+	if err != nil {
+		return nil, err
 	}
 	if err := c.executePostgresWrites(ctx, namespace, metadata.PrimaryKey, operations); err != nil {
 		return nil, err

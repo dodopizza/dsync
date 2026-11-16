@@ -821,6 +821,9 @@ func (c *Simple) PostReadPlanningResult(flowId iface.FlowID, conn iface.Connecto
 }
 
 func (c *Simple) UpdateCDCResumeToken(flowId iface.FlowID, conn iface.ConnectorID, resumeToken []byte) error {
+	c.flowMutex.Lock()
+	defer c.flowMutex.Unlock()
+
 	// Get the flow details
 	flowDet, ok := c.getFlow(flowId)
 	if !ok {
