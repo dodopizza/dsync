@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,7 +21,6 @@ import (
 	"github.com/adiom-data/dsync/internal/gobregister"
 	"github.com/cespare/xxhash"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"golang.org/x/sync/errgroup"
@@ -80,11 +80,11 @@ func (c *conn) sendSinkBatch(ctx context.Context, batch *pgx.Batch, count int, o
 		var err error
 		tx, err = c.c.Begin(ctx)
 		if err != nil {
-			return err
+			return toConnectError(err)
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 		if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
-			return fmt.Errorf("failed to set session_replication_role: %w", err)
+			return toConnectError(fmt.Errorf("failed to set session_replication_role: %w", err))
 		}
 		sender = tx
 	}
@@ -94,14 +94,19 @@ func (c *conn) sendSinkBatch(ctx context.Context, batch *pgx.Batch, count int, o
 		if _, err := results.Exec(); err != nil {
 			onError(i, err)
 			_ = results.Close()
-			return err
+			return toConnectError(err)
 		}
 	}
 	if err := results.Close(); err != nil {
-		return err
+		if !errors.Is(err, context.Canceled) {
+			slog.Error(fmt.Sprintf("Failed to complete batch: %v", err))
+		}
+		return toConnectError(err)
 	}
 	if tx != nil {
-		return tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return toConnectError(err)
+		}
 	}
 	return nil
 }
@@ -322,6 +327,10 @@ func NewConn(ctx context.Context, settings PostgresSettings) (*conn, error) {
 		settings.StreamFlushDelay = time.Minute * 3
 	}
 
+	if !validSlotName(settings.SlotName) {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errInvalidSlotName)
+	}
+
 	rUrl, err := createReplicationUrl(url)
 	if err != nil {
 		return nil, err
@@ -409,11 +418,11 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 			sampleQuery := fmt.Sprintf("SELECT %v FROM %v TABLESAMPLE BERNOULLI (%v) ORDER BY %v", primaryKeysPartial, sanitizedNamespace, percentage, primaryKeysPartial)
 			rows, err := c.c.Query(ctx, sampleQuery)
 			if err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 			ms, err := pgx.CollectRows(rows, pgx.RowToMap)
 			if err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 			for _, m := range ms {
 				getPrimaryKey(keys, m)
@@ -454,26 +463,26 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 
 		if c.settings.Force {
 			if _, err := c.c.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %v", sanitizedPublication)); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 
 			createPublicationQ := fmt.Sprintf("CREATE PUBLICATION %v FOR TABLE %v;", sanitizedPublication, strings.Join(sanitizedNamespaces, ", "))
 			if _, err := c.c.Exec(ctx, createPublicationQ); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 
 			var count int
 			if err := c.c.QueryRow(ctx, "SELECT COUNT(*) from pg_replication_slots WHERE slot_name=$1", c.settings.SlotName).Scan(&count); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 			if count > 0 {
 				if _, err := c.c.Exec(ctx, "SELECT pg_drop_replication_slot($1)", c.settings.SlotName); err != nil {
-					return nil, connect.NewError(connect.CodeInternal, err)
+					return nil, toConnectError(err)
 				}
 			}
 
 			if _, err := c.c.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", c.settings.SlotName); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 		}
 
@@ -521,13 +530,13 @@ func (c *conn) GetNamespaceMetadata(ctx context.Context, r *connect.Request[adio
 	sanitizedNamespace := SanitizeNamespace(r.Msg.GetNamespace())
 	var count int64
 	if err := c.c.QueryRow(ctx, "SELECT reltuples::bigint AS estimate FROM pg_class WHERE oid = $1::regclass", r.Msg.GetNamespace()).Scan(&count); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, toConnectError(err)
 	}
 	if count < c.settings.EstimatedCountThreshold {
 		row := c.c.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %v", sanitizedNamespace))
 		err := row.Scan(&count)
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, toConnectError(err)
 		}
 	}
 
@@ -597,11 +606,11 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 	q := fmt.Sprintf("SELECT * from %v%v%v ORDER BY %v LIMIT %v", SanitizeNamespace(namespace), where, strings.Join(whereQueries, " AND "), primaryKeysPartial, limit+1)
 	rows, err := c.c.Query(ctx, q, args...)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, toConnectError(err)
 	}
 	ms, err := pgx.CollectRows(rows, pgx.RowToMap)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, toConnectError(err)
 	}
 
 	var data [][]byte
@@ -781,16 +790,13 @@ func (c *conn) toBsonAdiomUpdate(update pglib.Update) (*adiomv1.Update, error) {
 
 // StreamUpdates implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.StreamUpdatesRequest], res *connect.ServerStream[adiomv1.StreamUpdatesResponse]) error {
-	pgConn, err := pgconn.Connect(ctx, c.replicationUrl)
-	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
-	}
-	defer pgConn.Close(ctx)
-
 	rawCursor := req.Msg.GetCursor()
 	cursor, err := DecodeStreamCursor(rawCursor)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
+	}
+	if !validSlotName(cursor.SlotName) {
+		return connect.NewError(connect.CodeInvalidArgument, errInvalidSlotName)
 	}
 
 	cs := &pglib.ChangeStream{
@@ -808,7 +814,10 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 	ch := make(chan pglib.UpdateBatch, 10)
 	eg.Go(func() error {
 		defer close(ch)
-		return cs.Run(ctx, ch)
+		if err := cs.Run(ctx, ch); err != nil {
+			return classifyStreamError(err)
+		}
+		return nil
 	})
 
 	eg.Go(func() error {
@@ -824,14 +833,14 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 			cursor.LSN = max(cursor.LSN, lastSafeLSN)
 			nextCursor, err := cursor.Encode()
 			if err != nil {
-				return err
+				return connect.NewError(connect.CodeInternal, err)
 			}
 			if err := res.Send(&adiomv1.StreamUpdatesResponse{
 				Updates:    batch,
 				Namespace:  ns,
 				NextCursor: nextCursor,
 			}); err != nil {
-				return err
+				return toConnectError(err)
 			}
 			batch = nil
 			deadline = time.Now().Add(maxBatchWait)
@@ -849,7 +858,7 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 				for _, update := range updateBatch.Updates {
 					up, err := c.toBsonAdiomUpdate(update)
 					if err != nil {
-						return err
+						return connect.NewError(connect.CodeInternal, err)
 					}
 					newNS := update.Namespace + "." + update.TableName
 					if ns != newNS {
@@ -1099,7 +1108,7 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 		operations = append(operations, operation)
 	}
 	if err := c.executePostgresWrites(ctx, namespace, metadata.PrimaryKey, operations); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, err
 	}
 
 	return connect.NewResponse(&adiomv1.WriteDataResponse{}), nil
@@ -1217,15 +1226,23 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		}
 	}
 	if err := c.executePostgresWrites(ctx, namespace, metadata.PrimaryKey, operations); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, err
 	}
 
 	return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil
 }
 
+var errInvalidSlotName = errors.New("invalid replication slot name")
+
+var slotNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+func validSlotName(name string) bool {
+	return slotNamePattern.MatchString(name)
+}
+
 func createReplicationUrl(urlString string) (string, error) {
 	parsed, err := url.Parse(urlString)
-	if err != nil {
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
 		return "", errors.New("invalid postgres connection string")
 	}
 	query := parsed.Query()

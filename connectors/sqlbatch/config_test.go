@@ -65,3 +65,26 @@ func TestParseConfigRejectsInvalidSinkBatchSizes(t *testing.T) {
 		}
 	}
 }
+
+func TestNewConnInvalidConnectionStringErrorHidesCredentials(t *testing.T) {
+	for i, tc := range []struct{ driver, connectionString string }{
+		{"sqlserver", "sqlserver://user:PWMARK@127.0.0.1:badport?database=x"},
+		{"oracle", "oracle://user:PWMARK@127.0.0.1:badport/svc"},
+		{"pgx", "postgres://user:PWMARK@127.0.0.1:badport/db"},
+		{"pgx", "postgres://user@127.0.0.1:1/db?password=PWMARK&sslmode=bogus"},
+		{"postgres", "postgres://user@127.0.0.1:1/db?password=PWMARK&sslmode=bogus"},
+	} {
+		path := filepath.Join(t.TempDir(), "sqlbatch.yml")
+		contents := []byte("driver: " + tc.driver + "\nconnectionstring: " + tc.connectionString + "\n")
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewConn(path)
+		if err == nil {
+			t.Fatalf("%s case %d: expected error", tc.driver, i)
+		}
+		if strings.Contains(err.Error(), "PWMARK") || strings.Contains(err.Error(), tc.connectionString) {
+			t.Fatalf("%s case %d: error exposes connection string", tc.driver, i)
+		}
+	}
+}

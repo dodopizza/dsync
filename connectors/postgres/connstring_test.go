@@ -14,7 +14,7 @@ func TestNewConnInvalidConnectionStringErrorHidesCredentials(t *testing.T) {
 		"postgres://PWuser@127.0.0.1:1/db?sslmode=bogus",
 		"postgres://user@127.0.0.1:1/db?sslmode=PWbogus",
 	} {
-		_, err := NewConn(t.Context(), PostgresSettings{URL: uri})
+		_, err := NewConn(t.Context(), PostgresSettings{URL: uri, SlotName: "dsync_slot"})
 		require.Error(t, err, uri)
 		assert.NotContains(t, err.Error(), "PW")
 	}

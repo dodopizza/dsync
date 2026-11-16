@@ -1,7 +1,10 @@
+//go:build external
+
 package pglib
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"testing"
@@ -9,6 +12,7 @@ import (
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestChangeStreamLiveToastAndTruncate(t *testing.T) {
@@ -19,11 +23,21 @@ func TestChangeStreamLiveToastAndTruncate(t *testing.T) {
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, connectionURL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("admin connect failed (%T)", err)
 	}
 
 	const publication = "dsync_live_publication"
 	const slot = "dsync_live_slot"
+	dropSlot := func(ctx context.Context) error {
+		for {
+			_, err := admin.Exec(ctx, `SELECT pg_drop_replication_slot('dsync_live_slot') FROM pg_replication_slots WHERE slot_name = 'dsync_live_slot'`)
+			pgErr, active := errors.AsType[*pgconn.PgError](err)
+			if err == nil || !active || pgErr.Code != "55006" || ctx.Err() != nil {
+				return err
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	var cancelStream context.CancelFunc
 	var streamDone <-chan struct{}
 	t.Cleanup(func() {
@@ -38,8 +52,10 @@ func TestChangeStreamLiveToastAndTruncate(t *testing.T) {
 
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if err := dropSlot(cleanupCtx); err != nil {
+			t.Errorf("cleanup drop slot: %v", err)
+		}
 		for _, statement := range []string{
-			`SELECT pg_drop_replication_slot('dsync_live_slot') FROM pg_replication_slots WHERE slot_name = 'dsync_live_slot'`,
 			`DROP PUBLICATION IF EXISTS dsync_live_publication`,
 			`DROP SCHEMA IF EXISTS dsync_stream_live CASCADE`,
 		} {
@@ -52,9 +68,13 @@ func TestChangeStreamLiveToastAndTruncate(t *testing.T) {
 		}
 	})
 
+	setupCtx, cancelSetup := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelSetup()
+	if err := dropSlot(setupCtx); err != nil {
+		t.Fatalf("setup drop slot: %v", err)
+	}
 	for _, statement := range []string{
 		`DROP PUBLICATION IF EXISTS dsync_live_publication`,
-		`SELECT pg_drop_replication_slot('dsync_live_slot') FROM pg_replication_slots WHERE slot_name = 'dsync_live_slot'`,
 		`DROP SCHEMA IF EXISTS dsync_stream_live CASCADE`,
 		`CREATE SCHEMA dsync_stream_live`,
 		`CREATE TABLE dsync_stream_live.events (id integer PRIMARY KEY, payload text, marker text)`,
@@ -77,7 +97,7 @@ func TestChangeStreamLiveToastAndTruncate(t *testing.T) {
 	}
 	replicationURL, err := url.Parse(connectionURL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse url failed (%T)", err)
 	}
 	query := replicationURL.Query()
 	query.Set("replication", "database")

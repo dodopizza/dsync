@@ -2,11 +2,14 @@ package pglib
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -141,6 +144,10 @@ func decodeTextColumnData(mi *pgtype.Map, data []byte, dataType uint32) (interfa
 	return string(data), nil
 }
 
+func errorResponseError(errMsg *pgproto3.ErrorResponse) error {
+	return fmt.Errorf("error in pg msg: %w", pgconn.ErrorResponseToPgError(errMsg))
+}
+
 func fillUnchangedValues(newValues, oldValues map[string]interface{}) {
 	for column, newValue := range newValues {
 		if _, unchanged := newValue.(unchangedToastValue); !unchanged {
@@ -175,13 +182,16 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- UpdateBatch) error {
 
 	pgConn, err := pgconn.Connect(ctx, c.ReplicationURL)
 	if err != nil {
+		if _, ok := errors.AsType[*pgconn.ParseConfigError](err); ok {
+			return errors.New("invalid replication connection string")
+		}
 		return err
 	}
 	defer pgConn.Close(ctx)
 
 	pluginArguments := []string{
 		"proto_version '2'",
-		fmt.Sprintf("publication_names '%v'", c.PublicationName),
+		publicationNamesArg(c.PublicationName),
 		"messages 'true'",
 	}
 
@@ -238,7 +248,7 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- UpdateBatch) error {
 			return err
 		}
 		if errMsg, ok := rawMsg.(*pgproto3.ErrorResponse); ok {
-			return fmt.Errorf("error in pg msg: %v", errMsg)
+			return errorResponseError(errMsg)
 		}
 		msg, ok := rawMsg.(*pgproto3.CopyData)
 		if !ok {
@@ -339,4 +349,8 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- UpdateBatch) error {
 			}
 		}
 	}
+}
+
+func publicationNamesArg(name string) string {
+	return "publication_names '" + strings.ReplaceAll(pgx.Identifier{name}.Sanitize(), "'", "''") + "'"
 }

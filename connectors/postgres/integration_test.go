@@ -1,3 +1,5 @@
+//go:build external
+
 package postgres
 
 import (
@@ -31,7 +33,7 @@ func TestPostgresConnectorLiveRoundTrip(t *testing.T) {
 	url := livePostgresURL(t)
 	admin, err := pgx.Connect(ctx, url)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("admin connect failed (%T)", err)
 	}
 	defer admin.Close(ctx)
 
@@ -67,7 +69,7 @@ func TestPostgresConnectorLiveRoundTrip(t *testing.T) {
 		}
 	}
 
-	c, err := NewConn(ctx, PostgresSettings{URL: url, Limit: 100})
+	c, err := NewConn(ctx, PostgresSettings{URL: url, Limit: 100, SlotName: "dsync_live_conn_slot"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,10 +358,10 @@ func TestPostgresConnectorLiveRoundTrip(t *testing.T) {
 	}
 	sinkURL, err := neturl.Parse(url)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse url failed (%T)", err)
 	}
 	sinkURL.User = neturl.UserPassword(sinkRole, "dsync-sink-password")
-	restrictedConn, err := NewConn(ctx, PostgresSettings{URL: sinkURL.String(), Limit: 100})
+	restrictedConn, err := NewConn(ctx, PostgresSettings{URL: sinkURL.String(), Limit: 100, SlotName: "dsync_live_conn_slot"})
 	if err != nil {
 		t.Fatalf("connect as restricted sink role: %v", err)
 	}
@@ -397,7 +399,7 @@ func TestPostgresConnectorLiveRoundTrip(t *testing.T) {
 		t.Fatalf("restricted sink left %d rows after delete", restrictedCount)
 	}
 
-	replicaConn, err := NewConn(ctx, PostgresSettings{URL: url, Limit: 100, EnableReplicaMode: true})
+	replicaConn, err := NewConn(ctx, PostgresSettings{URL: url, Limit: 100, SlotName: "dsync_live_conn_slot", EnableReplicaMode: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,3 +1,5 @@
+//go:build external
+
 package sqlbatch
 
 import (
@@ -11,7 +13,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/adiom-data/dsync/connectors/sqlbatch/dialects"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
+	"github.com/jackc/pgx/v5"
 	"github.com/microsoft/go-mssqldb/msdsn"
+	goora "github.com/sijms/go-ora/v2"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -61,10 +65,13 @@ func TestPostgresSinkLive(t *testing.T) {
 	if connectionURL == "" {
 		t.Skip("POSTGRES_TEST_URL is not set")
 	}
+	if _, err := pgx.ParseConfig(connectionURL); err != nil {
+		t.Fatalf("parse failed (%T)", err)
+	}
 	ctx := context.Background()
 	db, err := sql.Open("pgx", connectionURL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open failed (%T)", err)
 	}
 	defer db.Close()
 	for _, statement := range []string{
@@ -247,13 +254,13 @@ func TestSQLServerSinkLive(t *testing.T) {
 	}
 	dsn, err := msdsn.Parse(connectionURL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse failed (%T)", err)
 	}
 	dialect := dialects.SQLServer{GuidConversion: dsn.Encoding.GuidConversion}
 	ctx := context.Background()
 	db, err := sql.Open("sqlserver", connectionURL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open failed (%T)", err)
 	}
 	defer db.Close()
 	for _, statement := range []string{
@@ -580,10 +587,13 @@ func TestOracleSinkLive(t *testing.T) {
 	if connectionURL == "" {
 		t.Skip("ORACLE_TEST_URL is not set")
 	}
+	if _, err := goora.ParseConfig(connectionURL); err != nil {
+		t.Fatalf("parse failed (%T)", err)
+	}
 	ctx := context.Background()
 	db, err := sql.Open("oracle", connectionURL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open failed (%T)", err)
 	}
 	defer db.Close()
 	for _, table := range []string{"SQLBATCH_LIVE_ITEMS", "SQLBATCH_LIVE_IDENTITY", "SQLBATCH_LIVE_ALWAYS", "SQLBATCH_LIVE_DECIMAL_KEYS", "SQLBATCH_LIVE_TEMPORAL"} {

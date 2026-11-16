@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,7 +21,9 @@ import (
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/adiom-data/dsync/gen/adiom/v1/adiomv1connect"
 	"github.com/adiom-data/dsync/internal/gobregister"
+	"github.com/jackc/pgx/v5"
 	"github.com/microsoft/go-mssqldb/msdsn"
+	goora "github.com/sijms/go-ora/v2"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 )
@@ -627,6 +630,8 @@ func (c *conn) Teardown() {
 	_ = c.c.Close()
 }
 
+var errInvalidConnectionString = errors.New("invalid connection string")
+
 func NewConn(cfgFile string) (*conn, error) {
 	config, err := parseConfigFromFile(cfgFile)
 	if err != nil {
@@ -637,13 +642,19 @@ func NewConn(cfgFile string) (*conn, error) {
 	case "sqlserver":
 		dsn, err := msdsn.Parse(config.ConnectionString)
 		if err != nil {
-			return nil, fmt.Errorf("parse SQL Server connection string: %w", err)
+			return nil, errInvalidConnectionString
 		}
 		dialect = dialects.SQLServer{GuidConversion: dsn.Encoding.GuidConversion}
 	case "postgres", "pgx":
+		if _, err := pgx.ParseConfig(config.ConnectionString); err != nil {
+			return nil, errInvalidConnectionString
+		}
 		config.Driver = "pgx"
 		dialect = dialects.Postgres{}
 	case "oracle":
+		if _, err := goora.ParseConfig(config.ConnectionString); err != nil {
+			return nil, errInvalidConnectionString
+		}
 		dialect = dialects.Oracle{}
 	default:
 		return nil, fmt.Errorf("unsupported dialect %v", config.Driver)
@@ -651,7 +662,7 @@ func NewConn(cfgFile string) (*conn, error) {
 
 	db, err := sql.Open(config.Driver, config.ConnectionString)
 	if err != nil {
-		return nil, err
+		return nil, errInvalidConnectionString
 	}
 
 	return &conn{
