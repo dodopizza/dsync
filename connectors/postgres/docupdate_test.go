@@ -40,7 +40,7 @@ func TestDocUpdateStatementsUseTheCopyUpsertForInsertAndUpdate(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, plan.query, got[0].query)
-		assert.Equal(t, want[0], got[0].args)
+		assert.Equal(t, want[0].args, got[0].args)
 	}
 }
 

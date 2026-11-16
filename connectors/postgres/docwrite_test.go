@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -149,12 +151,12 @@ func TestDocBatchArgsStoresWholeDocumentWithEncodedIDAndSelectedColumns(t *testi
 
 	require.NoError(t, err)
 	require.Len(t, batch, 1)
-	require.Len(t, batch[0], 5)
-	assert.Equal(t, "s:k1", batch[0][0])
-	assert.JSONEq(t, `{"_id":"k1","Region":"eu","MixedCase":{"$numberInt":"4"},"extra":true}`, string(batch[0][1].([]byte)))
-	assert.Equal(t, "eu", batch[0][2])
-	assert.Equal(t, int32(4), batch[0][3])
-	assert.Equal(t, when, batch[0][4])
+	require.Len(t, batch[0].args, 5)
+	assert.Equal(t, "s:k1", batch[0].args[0])
+	assert.JSONEq(t, `{"_id":"k1","Region":"eu","MixedCase":{"$numberInt":"4"},"extra":true}`, string(batch[0].args[1].([]byte)))
+	assert.Equal(t, "eu", batch[0].args[2])
+	assert.Equal(t, int32(4), batch[0].args[3])
+	assert.Equal(t, when, batch[0].args[4])
 }
 
 func TestDocBatchArgsAbsentAndNullColumnsAreNull(t *testing.T) {
@@ -164,7 +166,7 @@ func TestDocBatchArgsAbsentAndNullColumnsAreNull(t *testing.T) {
 	batch, err := docBatchArgs(plan, [][]byte{raw}, time.Time{})
 
 	require.NoError(t, err)
-	assert.Nil(t, batch[0][3])
+	assert.Nil(t, batch[0].args[3])
 }
 
 func TestDocBatchArgsUpdatedAtFieldMustBeADateElseClock(t *testing.T) {
@@ -175,11 +177,11 @@ func TestDocBatchArgsUpdatedAtFieldMustBeADateElseClock(t *testing.T) {
 
 	fromField, err := docBatchArgs(plan, [][]byte{rawDoc(t, append(base, bson.E{Key: "ts", Value: bson.NewDateTimeFromTime(stamp)}))}, clock)
 	require.NoError(t, err)
-	assert.Equal(t, stamp, fromField[0][4])
+	assert.Equal(t, stamp, fromField[0].args[4])
 
 	fromClock, err := docBatchArgs(plan, [][]byte{rawDoc(t, base)}, clock)
 	require.NoError(t, err)
-	assert.Equal(t, clock, fromClock[0][4])
+	assert.Equal(t, clock, fromClock[0].args[4])
 
 	for _, bad := range []any{"2020-01-01", int64(5)} {
 		_, err = docBatchArgs(plan, [][]byte{rawDoc(t, append(base, bson.E{Key: "ts", Value: bad}))}, clock)
@@ -275,7 +277,7 @@ func TestDocStateLoadsOncePerNamespaceUnderParallelFirstWritesAndDoesNotCacheFai
 	assert.Equal(t, 2, failures)
 }
 
-func TestDocWriteErrorKeepsPositionColumnAndSQLStateButNeverTheServerMessage(t *testing.T) {
+func TestPositionedWriteErrorKeepsPositionColumnAndSQLStateButNeverTheServerMessage(t *testing.T) {
 	pgErr := &pgconn.PgError{Code: "22P02", Message: `invalid input syntax for type integer: "` + marker + `"`, ColumnName: "MixedCase"}
 	err := positionedWriteError("document", 3, fmt.Errorf("wrapped: %w", pgErr))
 	assert.Contains(t, err.Error(), "document 3")
@@ -286,16 +288,39 @@ func TestDocWriteErrorKeepsPositionColumnAndSQLStateButNeverTheServerMessage(t *
 	unique := positionedWriteError("document", 2, &pgconn.PgError{Code: "23505", Message: marker, Detail: "Key (n)=(" + marker + ") already exists.", ConstraintName: "numbers_n_key", TableName: "numbers"})
 	assert.Equal(t, "internal: document 2: constraint numbers_n_key: SQLSTATE 23505", unique.Error())
 
-	clientErr := positionedWriteError("document", 1, fmt.Errorf("unable to encode %s into binary format", marker))
-	assert.NotContains(t, clientErr.Error(), marker)
-	assert.Contains(t, clientErr.Error(), "document 1")
-
 	serialization := positionedWriteError("document", 0, &pgconn.PgError{Code: "40001", Message: marker})
 	assert.Equal(t, connect.CodeAborted, connect.CodeOf(serialization))
 	assert.NotContains(t, serialization.Error(), marker)
+}
 
-	unavailable := positionedWriteError("document", -1, &net.OpError{Op: "read", Err: errors.New("reset")})
-	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(unavailable))
+func TestPositionedWriteErrorClaimsNoPositionForFailuresTheServerDidNotAnswerPerStatement(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		code connect.Code
+	}{
+		"client error":  {fmt.Errorf("unable to encode %s into binary format", marker), connect.CodeInternal},
+		"read reset":    {&net.OpError{Op: "read", Err: errors.New("reset")}, connect.CodeUnavailable},
+		"preprocessing": {fmt.Errorf("batch: %w", pgx.ErrPreprocessingBatch{}), connect.CodeInternal},
+	}
+	for name, c := range cases {
+		err := positionedWriteError("document", 3, c.err)
+		assert.Equal(t, c.code, connect.CodeOf(err), name)
+		assert.NotContains(t, err.Error(), "document ", name)
+		assert.NotContains(t, err.Error(), marker, name)
+	}
+}
+
+func TestDocumentWriteAcquireFailureClaimsNoPositionAndStaysRetryable(t *testing.T) {
+	pool, err := pgxpool.New(t.Context(), closedPortURL)
+	require.NoError(t, err)
+	defer pool.Close()
+	c := &conn{c: pool}
+
+	err = c.execDocStatements(t.Context(), "document", []docStatement{{query: "SELECT 1", position: 0}, {query: "SELECT 1", position: 1}})
+
+	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+	assert.NotContains(t, err.Error(), "document ")
+	assert.NotContains(t, err.Error(), markerPassword)
 }
 
 func TestDocBatchArgsNullUpdatedAtFieldFallsBackToTheClock(t *testing.T) {
@@ -305,7 +330,7 @@ func TestDocBatchArgsNullUpdatedAtFieldFallsBackToTheClock(t *testing.T) {
 	batch, err := docBatchArgs(plan, [][]byte{rawDoc(t, bson.D{{Key: "_id", Value: int32(1)}, {Key: "Region", Value: "eu"}, {Key: "ts", Value: nil}})}, clock)
 
 	require.NoError(t, err)
-	assert.Equal(t, clock, batch[0][4])
+	assert.Equal(t, clock, batch[0].args[4])
 }
 
 func TestBuildDocPlanAllowsOnlyComparableSelectedColumnTypes(t *testing.T) {
@@ -353,9 +378,9 @@ func TestDocBatchArgsRejectsNonIntegralDoublesForIntegerColumnsOnly(t *testing.T
 
 	whole, err := docBatchArgs(plan, [][]byte{doc("big", 3)}, time.Time{})
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), whole[0][3])
+	assert.Equal(t, int64(3), whole[0].args[3])
 
 	fraction, err := docBatchArgs(plan, [][]byte{doc("ratio", 1.5)}, time.Time{})
 	require.NoError(t, err)
-	assert.Equal(t, 1.5, fraction[0][4])
+	assert.Equal(t, 1.5, fraction[0].args[4])
 }

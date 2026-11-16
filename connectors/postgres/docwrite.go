@@ -271,24 +271,26 @@ func (p *docPlan) updatedAtValue(doc bson.Raw, now time.Time) (time.Time, error)
 	return value.(time.Time), nil
 }
 
-func docBatchArgs(plan *docPlan, data [][]byte, now time.Time) ([][]any, error) {
-	batch := make([][]any, len(data))
+func docBatchArgs(plan *docPlan, data [][]byte, now time.Time) ([]docStatement, error) {
+	batch := make([]docStatement, len(data))
 	for i, raw := range data {
 		args, err := plan.args(raw, now)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("document %d: %w", i, err))
 		}
-		batch[i] = args
+		batch[i] = docStatement{query: plan.query, args: args, position: i}
 	}
 	return batch, nil
 }
 
 func positionedWriteError(label string, index int, err error) error {
+	pgErr, answered := errors.AsType[*pgconn.PgError](err)
+	_, wholeBatch := errors.AsType[pgx.ErrPreprocessingBatch](err)
 	position := "write failed"
-	if index >= 0 {
+	if answered && !wholeBatch && index >= 0 {
 		position = fmt.Sprintf("%s %d", label, index)
 	}
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
+	if answered {
 		detail := ""
 		if pgErr.ColumnName != "" {
 			detail += ": column " + pgErr.ColumnName
@@ -319,13 +321,9 @@ func (c *conn) writeDocuments(ctx context.Context, namespace string, data [][]by
 	if err != nil {
 		return err
 	}
-	args, err := docBatchArgs(plan, data, c.clock())
+	statements, err := docBatchArgs(plan, data, c.clock())
 	if err != nil {
 		return err
-	}
-	statements := make([]docStatement, len(args))
-	for i, a := range args {
-		statements[i] = docStatement{query: plan.query, args: a, position: i}
 	}
 	return c.execDocStatements(ctx, "document", statements)
 }
@@ -350,9 +348,8 @@ func (c *conn) execDocStatements(ctx context.Context, label string, statements [
 	if failure == nil {
 		failure = err
 	}
-	position := -1
-	if _, wholeBatch := errors.AsType[pgx.ErrPreprocessingBatch](failure); !wholeBatch && failedAt >= 0 {
-		position = statements[failedAt].position
+	if failedAt >= 0 {
+		failedAt = statements[failedAt].position
 	}
-	return positionedWriteError(label, position, failure)
+	return positionedWriteError(label, failedAt, failure)
 }
