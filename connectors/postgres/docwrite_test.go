@@ -3,8 +3,10 @@ package postgres
 import (
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -383,4 +385,20 @@ func TestDocBatchArgsRejectsNonIntegralDoublesForIntegerColumnsOnly(t *testing.T
 	fraction, err := docBatchArgs(plan, [][]byte{doc("ratio", 1.5)}, time.Time{})
 	require.NoError(t, err)
 	assert.Equal(t, 1.5, fraction[0].args[4])
+}
+
+func TestPositionedWriteErrorNamesTheReplicaRoleStepWithoutServerText(t *testing.T) {
+	serverText := "permission denied for parameter session_replication_role marker"
+	err := positionedWriteError("document", -1, setReplicaRoleError(&pgconn.PgError{Code: "42501", Message: serverText}))
+
+	assert.Equal(t, "write failed: setting session_replication_role: SQLSTATE 42501", err.Error()[strings.Index(err.Error(), "write failed"):])
+	assert.NotContains(t, err.Error(), serverText)
+	assert.NotContains(t, err.Error(), "failed to set")
+}
+
+func TestPositionedWriteErrorDoesNotRepeatTheCodeForConvertedClientErrors(t *testing.T) {
+	err := positionedWriteError("document", -1, toConnectError(io.ErrUnexpectedEOF))
+
+	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+	assert.Equal(t, 1, strings.Count(err.Error(), "unavailable"))
 }

@@ -284,11 +284,17 @@ func docBatchArgs(plan *docPlan, data [][]byte, now time.Time) ([]docStatement, 
 }
 
 func positionedWriteError(label string, index int, err error) error {
+	if converted, ok := errors.AsType[*connect.Error](err); ok && converted.Unwrap() != nil {
+		err = converted.Unwrap()
+	}
 	pgErr, answered := errors.AsType[*pgconn.PgError](err)
 	_, wholeBatch := errors.AsType[pgx.ErrPreprocessingBatch](err)
 	position := "write failed"
 	if answered && !wholeBatch && index >= 0 {
 		position = fmt.Sprintf("%s %d", label, index)
+	}
+	if errors.Is(err, errSetReplicaRole) {
+		position += ": setting session_replication_role"
 	}
 	if answered {
 		detail := ""
@@ -341,7 +347,7 @@ func (c *conn) execDocStatements(ctx context.Context, label string, statements [
 		batch.Queue(st.query, st.args...)
 	}
 	failedAt, failure := -1, error(nil)
-	err := c.execBatchWith(ctx, batch, func(i int, err error) { failedAt, failure = i, err }, func(error) {})
+	err := c.sendSinkBatch(ctx, batch, len(statements), func(i int, err error) { failedAt, failure = i, err })
 	if err == nil {
 		return nil
 	}

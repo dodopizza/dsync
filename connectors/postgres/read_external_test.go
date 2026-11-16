@@ -206,7 +206,7 @@ func TestStartReplicationOnActiveSlotIsUnavailable(t *testing.T) {
 	r := newReplicationFixture(ctx, t)
 	run := func(ctx context.Context) error {
 		cs := &pglib.ChangeStream{ReplicationURL: r.conn.replicationUrl, ReplicationSlotName: r.slot, PublicationName: r.publication, MinFlushDelay: time.Minute}
-		return cs.Run(ctx, make(chan []pglib.Update, 1))
+		return cs.Run(ctx, make(chan pglib.UpdateBatch, 1))
 	}
 
 	first, cancel := context.WithCancel(ctx)
@@ -233,7 +233,7 @@ func TestStreamUpdatesUnencodableKeyIsInternal(t *testing.T) {
 	ctx := testContext(t)
 	r := newReplicationFixture(ctx, t)
 	table := strings.Split(r.namespace, ".")[0] + ".composite"
-	_, err := r.admin.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (id integer, at timestamptz, PRIMARY KEY (id, at))", table))
+	_, err := r.admin.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (id integer, at interval, PRIMARY KEY (id, at))", table))
 	must(t, err, "create table")
 	_, err = r.admin.Exec(ctx, fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", r.publication, table))
 	must(t, err, "add table")
@@ -241,7 +241,7 @@ func TestStreamUpdatesUnencodableKeyIsInternal(t *testing.T) {
 	result, _ := r.streamThroughServer(ctx, t)
 
 	r.waitWalSender(ctx, t)
-	_, err = r.admin.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1, now())", table))
+	_, err = r.admin.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1, '1 day')", table))
 	must(t, err, "insert")
 
 	streamErr := awaitStreamError(ctx, t, result)

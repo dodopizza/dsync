@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -93,6 +94,16 @@ type Update struct {
 	LSN       uint64
 }
 
+// UpdateBatch contains all row changes committed by a transaction and the LSN
+// that is safe to resume from. Updates may be empty (for example, TRUNCATE is
+// not representable as a row update), but the commit LSN is still meaningful.
+type UpdateBatch struct {
+	Updates []Update
+	LSN     uint64
+}
+
+type unchangedToastValue struct{}
+
 type ChangeStream struct {
 	ReplicationURL        string
 	ReplicationSlotName   string
@@ -113,6 +124,8 @@ func decodeToMap(state *replState, relationID uint32, columns []*pglogrepl.Tuple
 		switch col.DataType {
 		case 'n':
 			values[colName] = nil
+		case 'u':
+			values[colName] = unchangedToastValue{}
 		case 't':
 			val, err := decodeTextColumnData(state.typeMap, col.Data, relation.Columns[i].DataType)
 			if err != nil {
@@ -135,7 +148,31 @@ func errorResponseError(errMsg *pgproto3.ErrorResponse) error {
 	return fmt.Errorf("error in pg msg: %w", pgconn.ErrorResponseToPgError(errMsg))
 }
 
-func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
+func fillUnchangedValues(newValues, oldValues map[string]interface{}) {
+	for column, newValue := range newValues {
+		if _, unchanged := newValue.(unchangedToastValue); !unchanged {
+			continue
+		}
+		if oldValue, present := oldValues[column]; present {
+			if _, unchanged := oldValue.(unchangedToastValue); !unchanged {
+				newValues[column] = oldValue
+			}
+		}
+	}
+}
+
+func unchangedToastColumns(values map[string]interface{}) []string {
+	var columns []string
+	for column, value := range values {
+		if _, unchanged := value.(unchangedToastValue); unchanged {
+			columns = append(columns, column)
+		}
+	}
+	sort.Strings(columns)
+	return columns
+}
+
+func (c *ChangeStream) Run(ctx context.Context, ch chan<- UpdateBatch) error {
 	standbyMessageTimeout := time.Second * 10
 	minFlushDelay := c.MinFlushDelay
 	if c.StandbyMessageTimeout > 0 {
@@ -156,7 +193,6 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 		"proto_version '2'",
 		publicationNamesArg(c.PublicationName),
 		"messages 'true'",
-		"streaming 'true'",
 	}
 
 	if err := pglogrepl.StartReplication(ctx, pgConn, c.ReplicationSlotName, pglogrepl.LSN(startLSN+1), pglogrepl.StartReplicationOptions{PluginArgs: pluginArguments}); err != nil {
@@ -249,12 +285,10 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 			case *pglogrepl.BeginMessage:
 				state.currentLSN = logicalMsg.FinalLSN
 			case *pglogrepl.CommitMessage:
-				if len(state.updates) > 0 {
-					select {
-					case ch <- state.updates:
-					case <-ctx.Done():
-						return nil
-					}
+				select {
+				case ch <- UpdateBatch{Updates: state.updates, LSN: uint64(state.currentLSN)}:
+				case <-ctx.Done():
+					return nil
 				}
 				state.updates = nil
 				fh.Add(state.currentLSN)
@@ -281,6 +315,12 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 					if err != nil {
 						return err
 					}
+					// With REPLICA IDENTITY FULL, the old tuple supplies values
+					// represented as unchanged TOAST markers in the new tuple.
+					fillUnchangedValues(values, oldValues)
+				}
+				if columns := unchangedToastColumns(values); len(columns) > 0 {
+					return fmt.Errorf("update to %s.%s contains unchanged TOAST columns %v; set REPLICA IDENTITY FULL", ns, table, columns)
 				}
 				state.updates = append(state.updates, Update{
 					Namespace: ns,

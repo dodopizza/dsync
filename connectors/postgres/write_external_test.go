@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	postgresEnvironmentVariable = "POSTGRES_TEST"
+	postgresEnvironmentVariable = "POSTGRES_TEST_URL"
 	pollInterval                = 10 * time.Millisecond
 	testTimeout                 = 30 * time.Second
 )
@@ -92,10 +92,20 @@ CREATE TABLE %[1]s.items (id integer PRIMARY KEY, v text NOT NULL, ref integer R
 	t.Cleanup(pool.Close)
 
 	namespace := schema + ".items"
+	pkeys, err := getTablePrimaryKeySchema(ctx, pool)
+	must(t, err, "primary keys")
+	columns, err := getTableColumns(ctx, pool)
+	must(t, err, "columns")
+	sinkMetadata, err := getSinkTableMetadata(ctx, pool, pkeys)
+	must(t, err, "sink metadata")
+	hasIDColumn, idAliases := idColumnMetadata(columns, pkeys)
 	return &writeFixture{
 		conn: &conn{
 			c:            pool,
-			pkeys:        map[string][]string{namespace: {"id"}},
+			pkeys:        pkeys,
+			sinkMetadata: sinkMetadata,
+			hasIDColumn:  hasIDColumn,
+			idAliases:    idAliases,
 			bsonRegistry: NewBSONRegistry(),
 		},
 		namespace: namespace,
@@ -269,11 +279,11 @@ func TestWriteDataBatchIsAtomic(t *testing.T) {
 	ctx := testContext(t)
 	f := newWriteFixture(ctx, t)
 
-	err := f.writeData(ctx, item(t, 1, "a"), item(t, 2, "b"), item(t, 3, nil))
+	err := f.writeData(ctx, item(t, 1, "a"), item(t, 2, "b"), item(t, 3, "a\x00b"))
 
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
-	assert.Equal(t, "23502", sqlState(t, err))
+	assert.Equal(t, "22021", sqlState(t, err))
 	assert.Empty(t, f.rows(ctx, t))
 }
 
@@ -282,12 +292,12 @@ func TestWriteUpdatesBatchIsAtomic(t *testing.T) {
 	f := newWriteFixture(ctx, t)
 	require.NoError(t, f.writeData(ctx, item(t, 1, "a")))
 
-	nullValue := &adiomv1.Update{Id: idValue(t, 3), Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT, Data: item(t, 3, nil)}
-	err := f.writeUpdates(ctx, upsert(t, 1, "changed"), upsert(t, 2, "b"), nullValue)
+	nulByteInsert := &adiomv1.Update{Id: idValue(t, 3), Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT, Data: item(t, 3, "a\x00b")}
+	err := f.writeUpdates(ctx, upsert(t, 1, "changed"), upsert(t, 2, "b"), nulByteInsert)
 
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
-	assert.Equal(t, "23502", sqlState(t, err))
+	assert.Equal(t, "22021", sqlState(t, err))
 	assert.Equal(t, map[int32]string{1: "a"}, f.rows(ctx, t))
 }
 
