@@ -10,6 +10,7 @@ import (
 
 	"connectrpc.com/connect"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -112,4 +113,21 @@ func TestStreamUpdatesRejectsInvalidCursorSlotName(t *testing.T) {
 
 	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
 	assert.EqualError(t, err, "invalid_argument: invalid replication slot name")
+}
+
+func TestDocumentModeShapeLoadFailuresHideConnectionString(t *testing.T) {
+	logs := captureLogs(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, closedPortURL)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	c := &conn{c: pool, settings: PostgresSettings{URL: closedPortURL, DocumentMode: true}}
+
+	_, writeErr := c.WriteData(ctx, connect.NewRequest(&adiomv1.WriteDataRequest{Namespace: "app.items"}))
+	_, updateErr := c.WriteUpdates(ctx, connect.NewRequest(&adiomv1.WriteUpdatesRequest{Namespace: "app.items"}))
+
+	require.Error(t, writeErr)
+	require.Error(t, updateErr)
+	assertNoSecrets(t, closedPortURL, writeErr.Error(), updateErr.Error(), logs.String())
 }

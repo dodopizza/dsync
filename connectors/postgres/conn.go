@@ -47,6 +47,10 @@ type PostgresSettings struct {
 	// When true, sets session_replication_role = 'replica' for sink operations
 	// This disables triggers and rules, useful when replicating data
 	EnableReplicaMode bool
+
+	DocumentMode    bool
+	UpdatedAtColumn string
+	UpdatedAtField  string
 }
 
 func init() {
@@ -67,10 +71,19 @@ type conn struct {
 	idAliases    map[string]string
 	settings     PostgresSettings
 	bsonRegistry *bson.Registry
+
+	docs docState
+	now  func() time.Time
 }
 
 type batchSender interface {
 	SendBatch(context.Context, *pgx.Batch) pgx.BatchResults
+}
+
+var errSetReplicaRole = errors.New("failed to set session_replication_role")
+
+func setReplicaRoleError(err error) error {
+	return toConnectError(fmt.Errorf("%w: %w", errSetReplicaRole, err))
 }
 
 func (c *conn) sendSinkBatch(ctx context.Context, batch *pgx.Batch, count int, onError func(int, error)) error {
@@ -84,7 +97,7 @@ func (c *conn) sendSinkBatch(ctx context.Context, batch *pgx.Batch, count int, o
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 		if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
-			return toConnectError(fmt.Errorf("failed to set session_replication_role: %w", err))
+			return setReplicaRoleError(err)
 		}
 		sender = tx
 	}
@@ -98,7 +111,7 @@ func (c *conn) sendSinkBatch(ctx context.Context, batch *pgx.Batch, count int, o
 		}
 	}
 	if err := results.Close(); err != nil {
-		if !errors.Is(err, context.Canceled) {
+		if !c.settings.DocumentMode && !errors.Is(err, context.Canceled) {
 			slog.Error(fmt.Sprintf("Failed to complete batch: %v", err))
 		}
 		return toConnectError(err)
@@ -1087,6 +1100,12 @@ func (c *conn) WriteData(ctx context.Context, r *connect.Request[adiomv1.WriteDa
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("partial write results are not supported by postgres"))
 	}
 	namespace := r.Msg.GetNamespace()
+	if c.settings.DocumentMode {
+		if err := c.writeDocuments(ctx, namespace, r.Msg.GetData()); err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(&adiomv1.WriteDataResponse{}), nil
+	}
 	metadata, err := c.sinkTable(namespace)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -1180,6 +1199,12 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("partial write results are not supported by postgres"))
 	}
 	namespace := r.Msg.GetNamespace()
+	if c.settings.DocumentMode {
+		if err := c.writeDocumentUpdates(ctx, namespace, r.Msg.GetUpdates()); err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil
+	}
 	metadata, err := c.sinkTable(namespace)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)

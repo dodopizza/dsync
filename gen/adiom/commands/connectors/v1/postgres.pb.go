@@ -35,6 +35,9 @@ type PostgresFlags struct {
 	EstimatedCountThreshold int64                  `protobuf:"varint,8,opt,name=estimated_count_threshold,json=estimatedCountThreshold,proto3" json:"estimated_count_threshold,omitempty"`
 	DocPartition            int64                  `protobuf:"varint,9,opt,name=doc_partition,json=docPartition,proto3" json:"doc_partition,omitempty"`
 	EnableReplicaMode       bool                   `protobuf:"varint,10,opt,name=enable_replica_mode,json=enableReplicaMode,proto3" json:"enable_replica_mode,omitempty"`
+	DocumentMode            bool                   `protobuf:"varint,11,opt,name=document_mode,json=documentMode,proto3" json:"document_mode,omitempty"`
+	UpdatedAtColumn         string                 `protobuf:"bytes,12,opt,name=updated_at_column,json=updatedAtColumn,proto3" json:"updated_at_column,omitempty"`
+	UpdatedAtField          string                 `protobuf:"bytes,13,opt,name=updated_at_field,json=updatedAtField,proto3" json:"updated_at_field,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -139,11 +142,32 @@ func (x *PostgresFlags) GetEnableReplicaMode() bool {
 	return false
 }
 
+func (x *PostgresFlags) GetDocumentMode() bool {
+	if x != nil {
+		return x.DocumentMode
+	}
+	return false
+}
+
+func (x *PostgresFlags) GetUpdatedAtColumn() string {
+	if x != nil {
+		return x.UpdatedAtColumn
+	}
+	return ""
+}
+
+func (x *PostgresFlags) GetUpdatedAtField() string {
+	if x != nil {
+		return x.UpdatedAtField
+	}
+	return ""
+}
+
 var File_adiom_commands_connectors_v1_postgres_proto protoreflect.FileDescriptor
 
 const file_adiom_commands_connectors_v1_postgres_proto_rawDesc = "" +
 	"\n" +
-	"+adiom/commands/connectors/v1/postgres.proto\x12\x1cadiom.commands.connectors.v1\x1a\x1ccommandargs/v1/options.proto\x1a\x1egoogle/protobuf/duration.proto\"\xde\v\n" +
+	"+adiom/commands/connectors/v1/postgres.proto\x12\x1cadiom.commands.connectors.v1\x1a\x1ccommandargs/v1/options.proto\x1a\x1egoogle/protobuf/duration.proto\"\x95\x10\n" +
 	"\rPostgresFlags\x12k\n" +
 	"\tpage_size\x18\x01 \x01(\x05BN\x82\xb5\x18J\n" +
 	"\tpage-size\x127Specify pagination limit when fetching for initial sync\x1a\x041000R\bpageSize\x12\x9d\x01\n" +
@@ -165,7 +189,13 @@ const file_adiom_commands_connectors_v1_postgres_proto_rawDesc = "" +
 	"\rdoc-partition\x1a\x06100000R\fdocPartition\x12\xc8\x01\n" +
 	"\x13enable_replica_mode\x18\n" +
 	" \x01(\bB\x97\x01\x82\xb5\x18\x92\x01\n" +
-	"\x13enable-replica-mode\x12uEnable replica mode (SET session_replication_role = 'replica') for sink operations. This disables triggers and rules.\x1a\x04trueR\x11enableReplicaMode::\x82\xb5\x186\n" +
+	"\x13enable-replica-mode\x12uEnable replica mode (SET session_replication_role = 'replica') for sink operations. This disables triggers and rules.\x1a\x04trueR\x11enableReplicaMode\x12\xd1\x01\n" +
+	"\rdocument_mode\x18\v \x01(\bB\xab\x01\x82\xb5\x18\xa6\x01\n" +
+	"\rdocument-mode\x12\x94\x01Destination: store each document as a row of a pre-created table with an id text column and a doc jsonb column instead of mapping fields to columns.R\fdocumentMode\x12\x8a\x01\n" +
+	"\x11updated_at_column\x18\f \x01(\tB^\x82\xb5\x18Z\n" +
+	"\x11updated-at-column\x12EDocument mode: timestamp column set when a row is written or changed.R\x0fupdatedAtColumn\x12\xd3\x01\n" +
+	"\x10updated_at_field\x18\r \x01(\tB\xa8\x01\x82\xb5\x18\xa3\x01\n" +
+	"\x10updated-at-field\x12\x8e\x01Document mode: top-level date field of the document used for the updated-at column instead of the transfer time. Requires --updated-at-column.R\x0eupdatedAtField::\x82\xb5\x186\n" +
 	"\bPostgres\"*postgresql://user:pass@host:port [options]BKZIgithub.com/adiom-data/dsync/gen/adiom/commands/connectors/v1;connectorsv1b\x06proto3"
 
 var (
