@@ -9,11 +9,11 @@ package cosmos
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/adiom-data/dsync/protocol/iface"
@@ -24,8 +24,7 @@ import (
 )
 
 const (
-	// batch size for ids to check
-	idsBatchSize = 1000
+	witnessPageSize = 1000
 	// number of parallel tasks to scan the witness index
 	numParallelWitnessScanTasks = 4
 	// number of parallel tasks to scan the source index
@@ -33,21 +32,21 @@ const (
 )
 
 type deleteStages struct {
-	differs func(ctx context.Context, ns iface.Namespace) (bool, error)
-	scan    func(ctx context.Context, ns iface.Namespace, emit func([]any) error) error
-	missing func(ctx context.Context, loc iface.Location, ids []any) ([]any, error)
+	scan    func(ctx context.Context, ns iface.Namespace, emit func([]bson.RawValue) error) error
+	missing func(ctx context.Context, loc iface.Location, keys []bson.RawValue) ([]bson.RawValue, error)
 }
 
-func checkForDeletes(ctx context.Context, client *mongo.Client, witnessClient *mongo.Client, namespaces []iface.Namespace) (map[iface.Location][]*adiomv1.Update, error) {
+type passSummary struct {
+	Namespaces int
+	Keys       int
+	Deletes    int
+}
+
+func checkForDeletes(ctx context.Context, client *mongo.Client, witness Witness, namespaces []iface.Namespace) (map[iface.Location][]*adiomv1.Update, passSummary, error) {
 	return runDeletePass(ctx, namespaces, deleteStages{
-		differs: func(ctx context.Context, ns iface.Namespace) (bool, error) {
-			return namespaceCountsDiffer(ctx, client, witnessClient, ns)
-		},
-		scan: func(ctx context.Context, ns iface.Namespace, emit func([]any) error) error {
-			return scanWitnessNamespace(ctx, witnessClient, ns, emit)
-		},
-		missing: func(ctx context.Context, loc iface.Location, ids []any) ([]any, error) {
-			return missingSourceIds(ctx, client, loc, ids)
+		scan: witnessScan(witness, witnessPageSize),
+		missing: func(ctx context.Context, loc iface.Location, keys []bson.RawValue) ([]bson.RawValue, error) {
+			return missingSourceKeys(ctx, client, loc, keys)
 		},
 	})
 }
@@ -87,48 +86,44 @@ func runStage(g *errgroup.Group, workers int, closeOutput func(), work func() er
 	})
 }
 
-func runDeletePass(ctx context.Context, namespaces []iface.Namespace, st deleteStages) (map[iface.Location][]*adiomv1.Update, error) {
+func runDeletePass(ctx context.Context, namespaces []iface.Namespace, st deleteStages) (map[iface.Location][]*adiomv1.Update, passSummary, error) {
 	g, gctx := errgroup.WithContext(ctx)
-	mismatched := make(chan iface.Namespace)
-	idsToCheck := make(chan idsWithLocation)
-	idsToDelete := make(chan idsWithLocation)
+	toScan := make(chan iface.Namespace)
+	keysToCheck := make(chan idsWithLocation)
+	keysToDelete := make(chan idsWithLocation)
+	var scanned, keys atomic.Int64
 
 	g.Go(func() error {
-		defer close(mismatched)
+		defer close(toScan)
 		for _, ns := range namespaces {
-			differs, err := st.differs(gctx, ns)
-			if err != nil {
-				return err
-			}
-			if !differs {
-				continue
-			}
-			if err := sendOrDone(gctx, mismatched, ns); err != nil {
+			if err := sendOrDone(gctx, toScan, ns); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
 
-	runStage(g, numParallelWitnessScanTasks, func() { close(idsToCheck) }, func() error {
+	runStage(g, numParallelWitnessScanTasks, func() { close(keysToCheck) }, func() error {
 		for {
-			ns, ok, err := recvOrDone(gctx, mismatched)
+			ns, ok, err := recvOrDone(gctx, toScan)
 			if err != nil || !ok {
 				return err
 			}
 			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
-			err = st.scan(gctx, ns, func(ids []any) error {
-				return sendOrDone(gctx, idsToCheck, idsWithLocation{loc: loc, ids: ids})
+			err = st.scan(gctx, ns, func(page []bson.RawValue) error {
+				keys.Add(int64(len(page)))
+				return sendOrDone(gctx, keysToCheck, idsWithLocation{loc: loc, ids: page})
 			})
 			if err != nil {
 				return err
 			}
+			scanned.Add(1)
 		}
 	})
 
-	runStage(g, numParallelSourceScanTasks, func() { close(idsToDelete) }, func() error {
+	runStage(g, numParallelSourceScanTasks, func() { close(keysToDelete) }, func() error {
 		for {
-			batch, ok, err := recvOrDone(gctx, idsToCheck)
+			batch, ok, err := recvOrDone(gctx, keysToCheck)
 			if err != nil || !ok {
 				return err
 			}
@@ -139,104 +134,71 @@ func runDeletePass(ctx context.Context, namespaces []iface.Namespace, st deleteS
 			if len(missing) == 0 {
 				continue
 			}
-			if err := sendOrDone(gctx, idsToDelete, idsWithLocation{loc: batch.loc, ids: missing}); err != nil {
+			if err := sendOrDone(gctx, keysToDelete, idsWithLocation{loc: batch.loc, ids: missing}); err != nil {
 				return err
 			}
 		}
 	})
 
-	updates, convertErr := deleteUpdatesFromIDs(idsToDelete)
+	updates, convertErr := deleteUpdatesFromIDs(keysToDelete)
 	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, passSummary{}, err
 	}
 	if convertErr != nil {
-		return nil, convertErr
+		return nil, passSummary{}, convertErr
 	}
-	return updates, nil
+	deletes := 0
+	for _, u := range updates {
+		deletes += len(u)
+	}
+	return updates, passSummary{Namespaces: int(scanned.Load()), Keys: int(keys.Load()), Deletes: deletes}, nil
 }
 
-func namespaceCountsDiffer(ctx context.Context, client *mongo.Client, witnessClient *mongo.Client, ns iface.Namespace) (bool, error) {
-	sourceCount, err := client.Database(ns.Db).Collection(ns.Col).EstimatedDocumentCount(ctx)
-	if err != nil {
-		return false, fmt.Errorf("source count for %s.%s: %w", ns.Db, ns.Col, err)
+func witnessScan(w Witness, pageSize int) func(context.Context, iface.Namespace, func([]bson.RawValue) error) error {
+	return func(ctx context.Context, ns iface.Namespace, emit func([]bson.RawValue) error) error {
+		if err := w.ScanKeys(ctx, ns, pageSize, emit); err != nil {
+			return fmt.Errorf("witness scan of %s.%s: %w", ns.Db, ns.Col, err)
+		}
+		return nil
 	}
-	witnessCount, err := witnessClient.Database(ns.Db).Collection(ns.Col).EstimatedDocumentCount(ctx)
-	if err != nil {
-		return false, fmt.Errorf("witness count for %s.%s: %w", ns.Db, ns.Col, err)
-	}
-	if sourceCount != witnessCount {
-		slog.Debug(fmt.Sprintf("Mismatched namespace: %v, source count: %v, witness count: %v", ns, sourceCount, witnessCount))
-	}
-	return sourceCount != witnessCount, nil
 }
 
-func scanWitnessNamespace(ctx context.Context, witnessClient *mongo.Client, ns iface.Namespace, emit func([]any) error) error {
-	slog.Debug(fmt.Sprintf("Scanning witness index namespace %v", ns))
-	opts := options.Find().SetProjection(bson.M{"_id": 1})
-	cur, err := witnessClient.Database(ns.Db).Collection(ns.Col).Find(ctx, bson.M{}, opts)
-	if err != nil {
-		return fmt.Errorf("witness scan of %s.%s: %w", ns.Db, ns.Col, err)
+func missingSourceKeys(ctx context.Context, client *mongo.Client, loc iface.Location, keys []bson.RawValue) ([]bson.RawValue, error) {
+	if len(keys) == 0 {
+		return nil, nil
 	}
-	defer cur.Close(ctx)
-	var ids []any
-	for cur.Next(ctx) {
-		var idDoc bson.M
-		if err := cur.Decode(&idDoc); err != nil {
-			return fmt.Errorf("witness scan of %s.%s: decode: %w", ns.Db, ns.Col, err)
-		}
-		id, ok := idDoc["_id"]
-		if !ok {
-			return fmt.Errorf("witness scan of %s.%s: document without _id", ns.Db, ns.Col)
-		}
-		ids = append(ids, id)
-		if len(ids) == idsBatchSize {
-			if err := emit(ids); err != nil {
-				return err
-			}
-			ids = nil
-		}
+	known := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		known[canonicalKey(k)] = struct{}{}
 	}
-	if err := cur.Err(); err != nil {
-		return fmt.Errorf("witness scan of %s.%s: %w", ns.Db, ns.Col, err)
-	}
-	if len(ids) > 0 {
-		return emit(ids)
-	}
-	return nil
-}
-
-func missingSourceIds(ctx context.Context, client *mongo.Client, loc iface.Location, ids []any) ([]any, error) {
-	pipeline := mongo.Pipeline{
-		{{"$match", bson.D{{"_id", bson.D{{"$in", ids}}}}}},
-		{{"$group", bson.D{{"_id", nil}, {"ids", bson.D{{"$addToSet", "$_id"}}}}}},
-		{{"$project", bson.D{
-			{"missingIds", bson.D{{"$setDifference", bson.A{ids, "$ids"}}}},
-			{"_id", 0},
-		}}},
-	}
-	cur, err := client.Database(loc.Database).Collection(loc.Collection).Aggregate(ctx, pipeline)
+	opts := options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}})
+	cur, err := client.Database(loc.Database).Collection(loc.Collection).Find(ctx, bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: keys}}}}, opts)
 	if err != nil {
 		return nil, fmt.Errorf("source check of %s.%s: %w", loc.Database, loc.Collection, err)
 	}
 	defer cur.Close(ctx)
-	if !cur.Next(ctx) {
-		if err := cur.Err(); err != nil {
-			return nil, fmt.Errorf("source check of %s.%s: %w", loc.Database, loc.Collection, err)
+	present := make(map[string]struct{}, len(keys))
+	for cur.Next(ctx) {
+		id, err := cur.Current.LookupErr("_id")
+		if err != nil {
+			return nil, fmt.Errorf("source check of %s.%s: document without _id: %w", loc.Database, loc.Collection, err)
 		}
-		return ids, nil
+		key := canonicalKey(id)
+		if _, ok := known[key]; !ok {
+			return nil, fmt.Errorf("source check of %s.%s: source returned an _id matching no witness key of the page", loc.Database, loc.Collection)
+		}
+		present[key] = struct{}{}
 	}
-	var res bson.M
-	if err := cur.Decode(&res); err != nil {
-		return nil, fmt.Errorf("source check of %s.%s: decode: %w", loc.Database, loc.Collection, err)
+	if err := cur.Err(); err != nil {
+		return nil, fmt.Errorf("source check of %s.%s: %w", loc.Database, loc.Collection, err)
 	}
-	missing, ok := res["missingIds"].(bson.A)
-	if !ok {
-		return nil, fmt.Errorf("source check of %s.%s: unexpected result shape", loc.Database, loc.Collection)
+	var missing []bson.RawValue
+	for _, k := range keys {
+		if _, ok := present[canonicalKey(k)]; !ok {
+			missing = append(missing, k)
+		}
 	}
-	return []any(missing), nil
+	return missing, nil
 }
 
 /****************************************************
@@ -246,7 +208,7 @@ func missingSourceIds(ctx context.Context, client *mongo.Client, loc iface.Locat
 // tuple to store location and a set of id
 type idsWithLocation struct {
 	loc iface.Location
-	ids []interface{}
+	ids []bson.RawValue
 }
 
 // get all database names except system databases

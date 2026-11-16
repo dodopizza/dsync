@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"slices"
@@ -49,9 +50,9 @@ func setDefault[T comparable](field *T, defaultValue T) {
 type conn struct {
 	adiomv1connect.ConnectorServiceHandler
 
-	connectorSettings  ConnectorSettings
-	client             *mongo.Client
-	witnessMongoClient *mongo.Client
+	connectorSettings ConnectorSettings
+	client            *mongo.Client
+	witness           Witness
 
 	deletesCount atomic.Uint64
 
@@ -568,8 +569,15 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		}
 		run.deletesInterval = c.connectorSettings.DeletesCheckInterval
 		run.forceDelete = c.forceDelete
+		var summary passSummary
 		run.checkDeletes = func(ctx context.Context) (map[iface.Location][]*adiomv1.Update, error) {
-			return checkForDeletes(ctx, c.client, c.witnessMongoClient, nss)
+			var err error
+			var updates map[iface.Location][]*adiomv1.Update
+			updates, summary, err = checkForDeletes(ctx, c.client, c.witness, nss)
+			return updates, err
+		}
+		run.deletesDone = func() {
+			slog.Info(fmt.Sprintf("Emulated delete pass finished: namespaces=%d keys=%d deletes=%d", summary.Namespaces, summary.Keys, summary.Deletes))
 		}
 	}
 	return run.run(ctx)
@@ -582,6 +590,7 @@ type updatesRun struct {
 	epoch           int64
 	openStream      func(ctx context.Context, loc iface.Location) (eventStream, func(), error)
 	checkDeletes    func(ctx context.Context) (map[iface.Location][]*adiomv1.Update, error)
+	deletesDone     func()
 	deletesInterval time.Duration
 	forceDelete     <-chan struct{}
 	send            func(*adiomv1.StreamUpdatesResponse) error
@@ -630,6 +639,9 @@ func (u updatesRun) run(ctx context.Context) error {
 				if err != nil {
 					reportError(err)
 					return
+				}
+				if u.deletesDone != nil {
+					u.deletesDone()
 				}
 				ticker.Reset(u.deletesInterval)
 			}
@@ -696,8 +708,8 @@ func (c *conn) Teardown() {
 		teardownable.Teardown()
 	}
 	_ = c.client.Disconnect(context.Background())
-	if c.witnessMongoClient != nil {
-		_ = c.witnessMongoClient.Disconnect(context.Background())
+	if closer, ok := c.witness.(io.Closer); ok {
+		_ = closer.Close()
 	}
 }
 
@@ -712,7 +724,7 @@ func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler 
 	settings.partitionKey = "_id"
 	settings.CosmosSink = true
 
-	var witnessMongoClient *mongo.Client
+	var witness Witness
 	// Connect to the witness MongoDB instance
 	if settings.EmulateDeletes {
 		clientOptions := moptions.Client().ApplyURI(settings.WitnessMongoConnString).SetConnectTimeout(settings.ServerConnectTimeout)
@@ -720,7 +732,7 @@ func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler 
 		if err != nil {
 			panic(mongoconn.InvalidClientOptionsError(clientOptions))
 		}
-		witnessMongoClient = client
+		witness = mongoWitness{client: client}
 	}
 
 	client, err := mongoconn.MongoClient(context.Background(), settings.ConnectorSettings)
@@ -737,7 +749,7 @@ func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler 
 		ConnectorServiceHandler: mongoConn,
 		connectorSettings:       settings,
 		client:                  client,
-		witnessMongoClient:      witnessMongoClient,
+		witness:                 witness,
 		forceDelete:             make(chan struct{}),
 	}
 }
