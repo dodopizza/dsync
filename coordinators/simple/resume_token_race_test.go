@@ -49,6 +49,7 @@ func TestResumeTokenUpdateDoesNotRaceWithTaskDone(t *testing.T) {
 		}
 	})
 	wg.Wait()
+	record(c.NotifyTaskDone("f", "dst", 1, nil))
 
 	require.NoError(t, errs)
 	plan := c.flows["f"].ReadPlan

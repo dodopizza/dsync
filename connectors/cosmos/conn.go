@@ -338,7 +338,7 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 						})
 					})
 					if err != nil {
-						reportError(fmt.Errorf("failed to send LSN update: %w", err))
+						reportError(fmt.Errorf("LSN update for %s.%s: %w", loc.Database, loc.Collection, err))
 						return
 					}
 				}
@@ -590,7 +590,6 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 				err := deliverEmulatedDeletes(func() (map[iface.Location][]*adiomv1.Update, error) {
 					return checkForDeletes(streamCtx, c.client, c.witnessMongoClient, nss)
 				}, func(loc iface.Location, updates []*adiomv1.Update) error {
-					c.deletesCount.Add(uint64(len(updates)))
 					return sendWithCursor(sender, tokenMap, readPlanStartAt, loc, nil, func(cursor []byte) error {
 						if err := s.Send(&adiomv1.StreamUpdatesResponse{
 							Updates:    updates,
@@ -599,6 +598,7 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 						}); err != nil {
 							return fmt.Errorf("failed to send emulated deletes: %w", err)
 						}
+						c.deletesCount.Add(uint64(len(updates)))
 						return nil
 					})
 				})
