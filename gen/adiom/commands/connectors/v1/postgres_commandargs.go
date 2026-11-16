@@ -57,6 +57,18 @@ func PostgresFlagsCommandFlags() []cli.Flag {
 			Usage: "Enable replica mode (SET session_replication_role = 'replica') for sink operations. This disables triggers and rules.",
 			Value: true,
 		},
+		&cli.BoolFlag{
+			Name:  "document-mode",
+			Usage: "Destination: store each document as a row of a pre-created table with an id text column and a doc jsonb column instead of mapping fields to columns.",
+		},
+		&cli.StringFlag{
+			Name:  "updated-at-column",
+			Usage: "Document mode: timestamp column set when a row is written or changed.",
+		},
+		&cli.StringFlag{
+			Name:  "updated-at-field",
+			Usage: "Document mode: top-level date field of the document used for the updated-at column instead of the transfer time. Requires --updated-at-column.",
+		},
 	}
 }
 
@@ -72,6 +84,9 @@ func ParsePostgresFlags(c *cli.Context) (*PostgresFlags, error) {
 	cfg.EstimatedCountThreshold = c.Int64("estimated-count-threshold")
 	cfg.DocPartition = c.Int64("doc-partition")
 	cfg.EnableReplicaMode = c.Bool("enable-replica-mode")
+	cfg.DocumentMode = c.Bool("document-mode")
+	cfg.UpdatedAtColumn = c.String("updated-at-column")
+	cfg.UpdatedAtField = c.String("updated-at-field")
 	return cfg, nil
 }
 

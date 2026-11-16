@@ -131,11 +131,8 @@ func (p *docPlan) upsertArgs(u *adiomv1.Update, now time.Time) ([]any, error) {
 			continue
 		}
 		want, _ := partID(parts[namedParts(parts, name)[0]])
-		field, err := doc.LookupErr(name)
-		if err != nil {
-			return nil, fmt.Errorf("key column %s differs from the document", name)
-		}
-		if got, err := encodeID(field.Type, field.Value); err != nil || got != want {
+		field, _ := doc.LookupErr(name)
+		if got, _ := encodeID(field.Type, field.Value); got != want {
 			return nil, fmt.Errorf("key column %s differs from the document", name)
 		}
 	}

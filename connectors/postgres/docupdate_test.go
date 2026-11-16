@@ -286,3 +286,35 @@ func TestDocUpdateStatementsDeleteFillsAnIDNamedKeyColumnFromTheIDPart(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, []any{"s:abc", "abc"}, got[0].args)
 }
+
+func TestDocUpdateStatementsDeleteIgnoresANonKeyIDNamedColumn(t *testing.T) {
+	plan, err := buildDocPlan("app.items", docTable{
+		Columns:    []docColumn{{Name: "_id", Type: "integer"}},
+		PrimaryKey: []string{docIDColumn},
+		Constraint: "items_pkey",
+	}, PostgresSettings{})
+	require.NoError(t, err)
+
+	got, err := docUpdateStatements(plan, []*adiomv1.Update{deleteUpdate(idPart(t, "_id", 1.5))}, time.Time{})
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Len(t, got[0].args, 1)
+}
+
+func TestDocUpdateStatementsRejectNamedKeyPartWhoseFieldIsAbsentFromTheDocument(t *testing.T) {
+	plan := keyedPlan(t, docColumn{Name: "k", Type: "text"})
+	for name, raw := range map[string][]byte{
+		"absent": rawDoc(t, bson.D{{Key: "_id", Value: int32(1)}}),
+		"null":   rawDoc(t, bson.D{{Key: "_id", Value: int32(1)}, {Key: "k", Value: nil}}),
+	} {
+		update := upsertUpdate(adiomv1.UpdateType_UPDATE_TYPE_UPDATE, []*adiomv1.BsonValue{idPart(t, "_id", int32(1)), idPart(t, "k", marker)}, raw)
+
+		_, err := docUpdateStatements(plan, []*adiomv1.Update{update}, time.Time{})
+
+		require.Error(t, err, name)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err), name)
+		assert.Contains(t, err.Error(), "update 0", name)
+		assert.NotContains(t, err.Error(), marker, name)
+	}
+}

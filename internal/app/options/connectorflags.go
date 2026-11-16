@@ -62,6 +62,7 @@ var (
 	uriValue         = regexp.MustCompile(`^\s*[A-Za-z][A-Za-z0-9+.-]*://`)
 	embeddedURIValue = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]*@`)
 	userinfoValue    = regexp.MustCompile(`^\s*[\w.%+-]+:[^\s/@]*@`)
+	keywordPassword  = regexp.MustCompile(`(?i)\bpassword\s*=`)
 )
 
 func RejectConnectionStringValues(c *cli.Context) error {
@@ -75,7 +76,7 @@ func RejectConnectionStringValues(c *cli.Context) error {
 			values = []string{c.String(name)}
 		}
 		credentialed := func(v string) bool {
-			return uriValue.MatchString(v) ||
+			return uriValue.MatchString(v) || keywordPassword.MatchString(v) ||
 				name != "projection" && embeddedURIValue.MatchString(v) ||
 				!strings.HasPrefix(name, "namespace") && userinfoValue.MatchString(v)
 		}
@@ -442,6 +443,9 @@ func GetRegisteredConnectors() []RegisteredConnector {
 					}
 					flags, err := connectorsv1.ParsePostgresFlags(c)
 					if err != nil {
+						return nil, err
+					}
+					if err := validatePostgresFlags(flags); err != nil {
 						return nil, err
 					}
 					return postgres.NewConn(c.Context, postgresSettingsFromFlags(flags, args[0]))
@@ -868,8 +872,20 @@ Source:
    Currently, TOAST fields are not properly supported. Set the replica identity to full as a workaround.
 
 Destination:
-   Not currently supported
+   By default, writes the top-level fields of each document to same-named columns of an existing table with a primary key.
+
+   With --document-mode, stores each document in a pre-created table with an id text column and a doc jsonb column. See the README for the table layout and limits.
 `
+
+func validatePostgresFlags(f *connectorsv1.PostgresFlags) error {
+	if !f.DocumentMode && (f.UpdatedAtColumn != "" || f.UpdatedAtField != "") {
+		return errors.New("--updated-at-column and --updated-at-field need --document-mode")
+	}
+	if f.UpdatedAtField != "" && f.UpdatedAtColumn == "" {
+		return errors.New("--updated-at-field needs --updated-at-column")
+	}
+	return nil
+}
 
 func postgresSettingsFromFlags(f *connectorsv1.PostgresFlags, url string) postgres.PostgresSettings {
 	s := postgres.PostgresSettings{
@@ -882,6 +898,9 @@ func postgresSettingsFromFlags(f *connectorsv1.PostgresFlags, url string) postgr
 		EstimatedCountThreshold:    f.EstimatedCountThreshold,
 		TargetDocCountPerPartition: f.DocPartition,
 		EnableReplicaMode:          f.EnableReplicaMode,
+		DocumentMode:               f.DocumentMode,
+		UpdatedAtColumn:            f.UpdatedAtColumn,
+		UpdatedAtField:             f.UpdatedAtField,
 	}
 	if f.StreamMaxBatchWait != nil {
 		s.StreamMaxBatchWait = f.StreamMaxBatchWait.AsDuration()

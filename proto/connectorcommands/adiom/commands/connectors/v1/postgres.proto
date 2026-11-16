@@ -56,4 +56,16 @@ message PostgresFlags {
     usage: "Enable replica mode (SET session_replication_role = 'replica') for sink operations. This disables triggers and rules."
     default: "true"
   }];
+  bool document_mode = 11 [(commandargs.v1.flag) = {
+    name: "document-mode"
+    usage: "Destination: store each document as a row of a pre-created table with an id text column and a doc jsonb column instead of mapping fields to columns."
+  }];
+  string updated_at_column = 12 [(commandargs.v1.flag) = {
+    name: "updated-at-column"
+    usage: "Document mode: timestamp column set when a row is written or changed."
+  }];
+  string updated_at_field = 13 [(commandargs.v1.flag) = {
+    name: "updated-at-field"
+    usage: "Document mode: top-level date field of the document used for the updated-at column instead of the transfer time. Requires --updated-at-column."
+  }];
 }
