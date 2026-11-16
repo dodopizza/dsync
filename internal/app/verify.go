@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -112,6 +114,36 @@ type source struct {
 	skipStream      bool
 }
 
+func updateKey(parts []*adiomv1.BsonValue) []bson.RawValue {
+	if i := slices.IndexFunc(parts, func(p *adiomv1.BsonValue) bool { return p.GetName() == "_id" }); i >= 0 {
+		parts = parts[i : i+1]
+	}
+	var key []bson.RawValue
+	for _, p := range parts {
+		key = append(key, bson.RawValue{Type: bson.Type(p.GetType()), Value: p.GetData()})
+	}
+	return key
+}
+
+func send(ctx context.Context, ch chan<- Update, u Update) error {
+	select {
+	case ch <- u:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func hashKey(hasher hash.Hash64, ids []bson.RawValue) (uint64, error) {
+	hasher.Reset()
+	for _, id := range ids {
+		if _, err := hasher.Write(id.Value); err != nil {
+			return 0, err
+		}
+	}
+	return hasher.Sum64(), nil
+}
+
 func (s *source) readUpdates(ctx context.Context, partitions []*adiomv1.UpdatesPartition, ch chan<- Update) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	for _, partition := range partitions {
@@ -133,21 +165,16 @@ func (s *source) readUpdates(ctx context.Context, partitions []*adiomv1.UpdatesP
 					if update.GetType() == adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE {
 						return fmt.Errorf("verify does not support partial updates (namespace %s)", msg.GetNamespace())
 					}
-					var idBson []bson.RawValue
-					for _, id := range update.GetId() {
-						idBson = append(idBson, bson.RawValue{Type: bson.Type(id.GetType()), Value: id.GetData()})
+					idBson := updateKey(update.GetId())
+					if len(idBson) == 0 {
+						return fmt.Errorf("namespace %s: update has no id", msg.GetNamespace())
 					}
-					if update.GetType() == adiomv1.UpdateType_UPDATE_TYPE_DELETE {
-						ch <- Update{
-							Namespace: msg.GetNamespace(),
-							ID:        idBson,
-						}
-					} else {
-						ch <- Update{
-							Namespace: msg.GetNamespace(),
-							ID:        idBson,
-							Data:      update.GetData(),
-						}
+					out := Update{Namespace: msg.GetNamespace(), ID: idBson}
+					if update.GetType() != adiomv1.UpdateType_UPDATE_TYPE_DELETE {
+						out.Data = update.GetData()
+					}
+					if err := send(ctx, ch, out); err != nil {
+						return err
 					}
 				}
 			}
@@ -179,12 +206,17 @@ func (s *source) readPartitions(ctx context.Context, partitions []*adiomv1.Parti
 					return err
 				}
 				for _, d := range res.Msg.GetData() {
-					id := bson.Raw(d).Lookup("_id")
-					ch <- Update{
+					id, err := bson.Raw(d).LookupErr("_id")
+					if err != nil {
+						return fmt.Errorf("namespace %s: document has no _id", partition.GetNamespace())
+					}
+					if err := send(ctx, ch, Update{
 						Namespace:   partition.GetNamespace(),
 						ID:          []bson.RawValue{id},
 						Data:        d,
 						InitialSync: true,
+					}); err != nil {
+						return err
 					}
 				}
 				cursor = res.Msg.GetNextCursor()
@@ -262,13 +294,11 @@ func (s *source) ProcessSource(ctx context.Context, process func(context.Context
 		hasher := xxhash.New()
 		for update := range ch {
 			if s.totalPartitions > 0 {
-				hasher.Reset()
-				for _, id := range update.ID {
-					if _, err := hasher.Write(id.Value); err != nil {
-						return err
-					}
+				sum, err := hashKey(hasher, update.ID)
+				if err != nil {
+					return err
 				}
-				if hasher.Sum64()%uint64(s.totalPartitions) != uint64(s.partition) {
+				if sum%uint64(s.totalPartitions) != uint64(s.partition) {
 					continue
 				}
 			}
@@ -463,11 +493,10 @@ func processTail(std *SimpleTailDiffer, namespaceMap map[string]string, projecti
 			Type:  update.ID[0].Type,
 			Value: bytes.Clone(update.ID[0].Value),
 		}
-		hasher.Reset()
-		if _, err := hasher.Write(update.ID[0].Value); err != nil {
+		idHash, err := hashKey(hasher, update.ID)
+		if err != nil {
 			return err
 		}
-		idHash := hasher.Sum64()
 		namespace := util.MapNamespace(namespaceMap, update.Namespace, ".", ":")
 		id := NamespacedID{namespace, innerIDCopy}
 		if update.Data == nil {
