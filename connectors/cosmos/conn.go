@@ -203,10 +203,8 @@ func (c *conn) collectResumeTokens(ctx context.Context, nsTasks []iface.Namespac
 	tokenMap := NewTokenMap()
 	wg := sync.WaitGroup{}
 	tokenErrs := make([]error, len(nsTasks))
-	for i, nsTask := range nsTasks {
-		wg.Add(1)
-		go func(i int, ns iface.Namespace) {
-			defer wg.Done()
+	for i, ns := range nsTasks {
+		wg.Go(func() {
 			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
 			resumeToken, err := getLatestResumeToken(ctx, c.client, loc, c.connectorSettings.WithDelete)
 			if err != nil {
@@ -214,7 +212,7 @@ func (c *conn) collectResumeTokens(ctx context.Context, nsTasks []iface.Namespac
 				return
 			}
 			tokenMap.AddToken(loc, resumeToken)
-		}(i, nsTask)
+		})
 	}
 	wg.Wait()
 	if err := errors.Join(tokenErrs...); err != nil {

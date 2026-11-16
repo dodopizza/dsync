@@ -1,7 +1,6 @@
 package cosmos
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -152,12 +151,12 @@ func TestShardKeyFieldsAreFetchedForEachNamespaceOnlyWhenTheFlagIsOn(t *testing.
 	ns := iface.Namespace{Db: "db", Col: "col"}
 	client, commands := recordingClient(t, reply)
 
-	fields, err := streamShardKeyFields(context.Background(), client, []iface.Namespace{ns}, withFlags(false, false))
+	fields, err := streamShardKeyFields(t.Context(), client, []iface.Namespace{ns}, withFlags(false, false))
 	require.NoError(t, err)
 	require.Empty(t, fields)
 	require.Empty(t, *commands)
 
-	fields, err = streamShardKeyFields(context.Background(), client, []iface.Namespace{ns}, withFlags(true, false))
+	fields, err = streamShardKeyFields(t.Context(), client, []iface.Namespace{ns}, withFlags(true, false))
 	require.NoError(t, err)
 	require.Equal(t, []string{"tenant", "region"}, fields[ns])
 	require.Equal(t, []string{"customAction"}, *commands)
@@ -182,7 +181,7 @@ func streamUpdatesFor(t *testing.T, settings ConnectorSettings, response bson.D)
 	t.Helper()
 	client, commands := recordingClient(t, response)
 	connector := &conn{client: client, connectorSettings: settings}
-	err := connector.StreamUpdates(context.Background(), connect.NewRequest(&adiomv1.StreamUpdatesRequest{
+	err := connector.StreamUpdates(t.Context(), connect.NewRequest(&adiomv1.StreamUpdatesRequest{
 		Namespaces: []string{"db.col"}, Cursor: emptyCursor(t),
 	}), nil)
 	return err, *commands
@@ -215,7 +214,7 @@ func TestEmulatedDeletesWithFullDocumentKeyAreAllowedOnUnshardedNamespace(t *tes
 	client, _ := recordingClient(t, unshardedReply)
 	ns := iface.Namespace{Db: "db", Col: "col"}
 
-	fields, err := streamShardKeyFields(context.Background(), client, []iface.Namespace{ns}, withFlags(true, true))
+	fields, err := streamShardKeyFields(t.Context(), client, []iface.Namespace{ns}, withFlags(true, true))
 
 	require.NoError(t, err)
 	require.Empty(t, fields[ns])
@@ -224,7 +223,7 @@ func TestEmulatedDeletesWithFullDocumentKeyAreAllowedOnUnshardedNamespace(t *tes
 func TestShardKeyFieldsAreNotReadWhenEmulatedDeletesRunWithoutFullDocumentKey(t *testing.T) {
 	client, commands := recordingClient(t, shardedReply)
 
-	fields, err := streamShardKeyFields(context.Background(), client, []iface.Namespace{{Db: "db", Col: "col"}}, withFlags(false, true))
+	fields, err := streamShardKeyFields(t.Context(), client, []iface.Namespace{{Db: "db", Col: "col"}}, withFlags(false, true))
 
 	require.NoError(t, err)
 	require.Empty(t, fields)
@@ -234,7 +233,7 @@ func TestShardKeyFieldsAreNotReadWhenEmulatedDeletesRunWithoutFullDocumentKey(t 
 func TestFetchShardKeyFieldsReturnsTheCommandError(t *testing.T) {
 	client, _ := recordingClient(t, failedReply)
 
-	fields, err := fetchShardKeyFields(context.Background(), client, testLoc)
+	fields, err := fetchShardKeyFields(t.Context(), client, testLoc)
 
 	var commandErr mongo.CommandError
 	require.ErrorAs(t, err, &commandErr)
@@ -290,7 +289,7 @@ func TestShardKeyFieldsAreReadForEveryNamespace(t *testing.T) {
 	}
 	client, commands := recordingClient(t, reply("tenant"), reply("region"))
 
-	fields, err := streamShardKeyFields(context.Background(), client, []iface.Namespace{first, second}, withFlags(true, false))
+	fields, err := streamShardKeyFields(t.Context(), client, []iface.Namespace{first, second}, withFlags(true, false))
 
 	require.NoError(t, err)
 	require.Equal(t, map[iface.Namespace][]string{first: {"tenant"}, second: {"region"}}, fields)

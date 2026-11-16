@@ -63,10 +63,7 @@ func TestPlannerSplitsNonObjectIdCollectionsWithoutGapsOrDuplicates(t *testing.T
 			_, err := col.InsertMany(ctx, docs)
 			require.NoError(t, err)
 
-			c := NewConn(ConnectorSettings{
-				ConnectorSettings:           mongoconn.ConnectorSettings{ConnectionString: uri, TargetDocCountPerPartition: 300},
-				NumParallelPartitionWorkers: 1,
-			})
+			c := NewConn(ConnectorSettings{ConnectionString: uri, TargetDocCountPerPartition: 300, NumParallelPartitionWorkers: 1})
 			t.Cleanup(c.(common.Teardownable).Teardown)
 			plan, err := c.GeneratePlan(ctx, connect.NewRequest(&adiomv1.GeneratePlanRequest{
 				Namespaces: []string{col.Database().Name() + "." + col.Name()}, InitialSync: true,

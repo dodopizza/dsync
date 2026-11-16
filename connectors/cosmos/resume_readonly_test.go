@@ -143,7 +143,7 @@ func TestGeneratePlanWithReadOnlyKeyAndNoCursorTokenFailsNamingNamespace(t *test
 	client, _ := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), collectionInfoReply, insertDeniedReply, cursorReply("nextBatch", bson.A{}, nil), cursorKilledReply)
 	connector := &conn{client: client, connectorSettings: ConnectorSettings{MaxNumNamespaces: 1}}
 
-	plan, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+	plan, err := connector.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
 		Namespaces: []string{"db.col"}, Updates: true,
 	}))
 

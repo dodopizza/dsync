@@ -92,7 +92,7 @@ func TestStreamNamespaceEventsStopsOnFailureAfterBufferedEvent(t *testing.T) {
 			stream := &fakeStream{events: []fakeEvent{goodEvent(1, "t1"), bad, goodEvent(0, "t3")}}
 			var out []flushed
 
-			err := streamNamespaceEvents(context.Background(), stream, testLoc, nil, recordFlushes(&out))
+			err := streamNamespaceEvents(t.Context(), stream, testLoc, nil, recordFlushes(&out))
 
 			require.ErrorContains(t, err, "db1.col1")
 			require.Empty(t, out)
@@ -106,7 +106,7 @@ func TestStreamNamespaceEventsReturnsStreamError(t *testing.T) {
 	stream := &fakeStream{events: []fakeEvent{goodEvent(1, "t1")}, err: boom}
 	var out []flushed
 
-	err := streamNamespaceEvents(context.Background(), stream, testLoc, nil, recordFlushes(&out))
+	err := streamNamespaceEvents(t.Context(), stream, testLoc, nil, recordFlushes(&out))
 
 	require.ErrorIs(t, err, boom)
 	require.ErrorContains(t, err, "db1.col1")
@@ -122,7 +122,7 @@ func TestStreamNamespaceEventsFlushesEventWithoutFullDocumentAtBatchEnd(t *testi
 	stream := &fakeStream{events: []fakeEvent{goodEvent(1, "t1"), noDoc}}
 	var out []flushed
 
-	err := streamNamespaceEvents(context.Background(), stream, testLoc, nil, recordFlushes(&out))
+	err := streamNamespaceEvents(t.Context(), stream, testLoc, nil, recordFlushes(&out))
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -187,7 +187,7 @@ func TestStreamNamespaceEventsPassesShardKeyFieldsIntoEveryId(t *testing.T) {
 	}}}
 	var out []flushed
 
-	err := streamNamespaceEvents(context.Background(), stream, testLoc, []string{"tenant"}, recordFlushes(&out))
+	err := streamNamespaceEvents(t.Context(), stream, testLoc, []string{"tenant"}, recordFlushes(&out))
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)

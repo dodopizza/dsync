@@ -1,7 +1,6 @@
 package cosmos
 
 import (
-	"context"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -21,7 +20,7 @@ func TestGeneratePlanWithoutUpdatesNeverTouchesChangeStream(t *testing.T) {
 	client, commands := recordingClient(t, countReply)
 	connector := &conn{client: client, connectorSettings: planSettings()}
 
-	plan, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+	plan, err := connector.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
 		Namespaces: []string{"db.col"}, InitialSync: true,
 	}))
 
@@ -35,7 +34,7 @@ func TestGeneratePlanTakesResumeTokenBeforePartitioning(t *testing.T) {
 	client, commands := recordingClient(t, responses...)
 	connector := &conn{client: client, connectorSettings: planSettings()}
 
-	plan, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+	plan, err := connector.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
 		Namespaces: []string{"db.col"}, InitialSync: true, Updates: true,
 	}))
 
@@ -48,7 +47,7 @@ func TestGeneratePlanTokenFailureStopsBeforePartitioning(t *testing.T) {
 	client, commands := recordingClient(t, bson.D{{Key: "ok", Value: 0}, {Key: "code", Value: 13}, {Key: "errmsg", Value: "change stream unavailable"}})
 	connector := &conn{client: client, connectorSettings: planSettings()}
 
-	plan, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+	plan, err := connector.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
 		Namespaces: []string{"db.col"}, InitialSync: true, Updates: true,
 	}))
 
@@ -77,7 +76,7 @@ func TestPartitionedTasksFormAnUnbrokenChainWithoutExtraLookups(t *testing.T) {
 	)
 	settings := planSettings()
 	settings.partitionKey = "_id"
-	p := &planner{Ctx: context.Background(), Client: client, settings: settings}
+	p := &planner{Ctx: t.Context(), Client: client, settings: settings}
 
 	tasks := p.partitionTasksIfNecessary([]iface.Namespace{{Db: "db", Col: "col"}})
 
@@ -107,7 +106,7 @@ func planWithUpdates(t *testing.T, settings ConnectorSettings, updates bool, res
 	settings.NumParallelPartitionWorkers = 1
 	settings.TargetDocCountPerPartition = 1000
 	connector := &conn{client: client, connectorSettings: settings}
-	_, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+	_, err := connector.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
 		Namespaces: []string{"db.col"}, InitialSync: true, Updates: updates,
 	}))
 	return err, *commands

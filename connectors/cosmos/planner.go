@@ -143,7 +143,7 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 					finalTasksChannel <- maxTask
 
 					//send the tasks between the split points
-					for i := 0; i < len(splitBounds)-1; i++ {
+					for i := range len(splitBounds) - 1 {
 						task := cc.createReadPlanTaskForNs(nsTask)
 						task.Def.PartitionKey = cc.settings.partitionKey
 						task.Def.Low = splitBounds[i]
