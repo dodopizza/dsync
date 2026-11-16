@@ -615,7 +615,7 @@ func TestBuildIndexedBulkModels_UnknownUpdateDoesNotSuppressWrite(t *testing.T) 
 	c := &conn{}
 	unknown := insertU(t, "a", bson.M{"ignored": true})
 	unknown.Type = adiomv1.UpdateType_UPDATE_TYPE_UNKNOWN
-	models, ordered, err := c.buildIndexedBulkModels([]*adiomv1.Update{
+	models, ordered, err := c.buildIndexedBulkModels("db.col", []*adiomv1.Update{
 		insertU(t, "a", bson.M{"v": 1}),
 		unknown,
 	})
