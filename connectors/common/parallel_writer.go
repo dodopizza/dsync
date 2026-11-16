@@ -272,7 +272,11 @@ func (ww *writerWorker) run() error {
 				}
 
 				if msg.BarrierType == iface.BarrierType_Block {
-					ww.parallelWriter.blockBarrier <- struct{}{}
+					select {
+					case ww.parallelWriter.blockBarrier <- struct{}{}:
+					case <-ww.parallelWriter.ctx.Done():
+						return nil
+					}
 				}
 
 				// if it's a task barrier, decrement the countdown for the task
