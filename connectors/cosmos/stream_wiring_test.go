@@ -155,7 +155,7 @@ func TestDeleteUpdatesFromIDsReportsMarshalErrorAndDrainsProducer(t *testing.T) 
 	go func() {
 		defer close(exited)
 		defer close(ch)
-		for _, ids := range [][]bson.RawValue{{mustKeys(int32(1))[0], {}, mustKeys(int32(3))[0]}, mustKeys(int32(4)), mustKeys(int32(5))} {
+		for _, ids := range [][][]bson.RawValue{{mustValues(int32(1)), {{}}, mustValues(int32(3))}, mustKeys(int32(4)), mustKeys(int32(5))} {
 			select {
 			case ch <- idsWithLocation{loc: testLoc, ids: ids}:
 			case <-stop:

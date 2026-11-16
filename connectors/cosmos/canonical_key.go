@@ -9,6 +9,7 @@ package cosmos
 import (
 	"math"
 	"strconv"
+	"strings"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -32,4 +33,15 @@ func canonicalKey(v bson.RawValue) string {
 		}
 	}
 	return "t" + string(rune(v.Type)) + string(v.Value)
+}
+
+func canonicalTuple(tuple []bson.RawValue) string {
+	var b strings.Builder
+	for _, v := range tuple {
+		k := canonicalKey(v)
+		b.WriteString(strconv.Itoa(len(k)))
+		b.WriteByte(':')
+		b.WriteString(k)
+	}
+	return b.String()
 }

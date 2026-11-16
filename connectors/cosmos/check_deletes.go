@@ -8,6 +8,7 @@ package cosmos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -32,21 +33,22 @@ const (
 )
 
 type deleteStages struct {
-	scan    func(ctx context.Context, ns iface.Namespace, emit func([]bson.RawValue) error) error
-	missing func(ctx context.Context, loc iface.Location, keys []bson.RawValue) ([]bson.RawValue, error)
+	scan    func(ctx context.Context, ns iface.Namespace, keyFields []string, emit func([][]bson.RawValue) error) error
+	missing func(ctx context.Context, loc iface.Location, keyFields []string, keys [][]bson.RawValue) ([][]bson.RawValue, int, error)
 }
 
 type passSummary struct {
 	Namespaces int
 	Keys       int
 	Deletes    int
+	Deferred   int
 }
 
-func checkForDeletes(ctx context.Context, client *mongo.Client, witness Witness, namespaces []iface.Namespace) (map[iface.Location][]*adiomv1.Update, passSummary, error) {
-	return runDeletePass(ctx, namespaces, deleteStages{
+func checkForDeletes(ctx context.Context, client *mongo.Client, witness Witness, namespaces []iface.Namespace, shardKeyFields map[iface.Namespace][]string) (map[iface.Location][]*adiomv1.Update, passSummary, error) {
+	return runDeletePass(ctx, namespaces, shardKeyFields, deleteStages{
 		scan: witnessScan(witness, witnessPageSize),
-		missing: func(ctx context.Context, loc iface.Location, keys []bson.RawValue) ([]bson.RawValue, error) {
-			return missingSourceKeys(ctx, client, loc, keys)
+		missing: func(ctx context.Context, loc iface.Location, keyFields []string, keys [][]bson.RawValue) ([][]bson.RawValue, int, error) {
+			return missingSourceKeys(ctx, client, loc, keyFields, keys)
 		},
 	})
 }
@@ -86,12 +88,12 @@ func runStage(g *errgroup.Group, workers int, closeOutput func(), work func() er
 	})
 }
 
-func runDeletePass(ctx context.Context, namespaces []iface.Namespace, st deleteStages) (map[iface.Location][]*adiomv1.Update, passSummary, error) {
+func runDeletePass(ctx context.Context, namespaces []iface.Namespace, shardKeyFields map[iface.Namespace][]string, st deleteStages) (map[iface.Location][]*adiomv1.Update, passSummary, error) {
 	g, gctx := errgroup.WithContext(ctx)
 	toScan := make(chan iface.Namespace)
 	keysToCheck := make(chan idsWithLocation)
 	keysToDelete := make(chan idsWithLocation)
-	var scanned, keys atomic.Int64
+	var scanned, keys, deferred atomic.Int64
 
 	g.Go(func() error {
 		defer close(toScan)
@@ -110,9 +112,10 @@ func runDeletePass(ctx context.Context, namespaces []iface.Namespace, st deleteS
 				return err
 			}
 			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
-			err = st.scan(gctx, ns, func(page []bson.RawValue) error {
+			fields := shardKeyFields[ns]
+			err = st.scan(gctx, ns, fields, func(page [][]bson.RawValue) error {
 				keys.Add(int64(len(page)))
-				return sendOrDone(gctx, keysToCheck, idsWithLocation{loc: loc, ids: page})
+				return sendOrDone(gctx, keysToCheck, idsWithLocation{loc: loc, fields: fields, ids: page})
 			})
 			if err != nil {
 				return err
@@ -127,14 +130,15 @@ func runDeletePass(ctx context.Context, namespaces []iface.Namespace, st deleteS
 			if err != nil || !ok {
 				return err
 			}
-			missing, err := st.missing(gctx, batch.loc, batch.ids)
+			missing, undecided, err := st.missing(gctx, batch.loc, batch.fields, batch.ids)
+			deferred.Add(int64(undecided))
 			if err != nil {
 				return err
 			}
 			if len(missing) == 0 {
 				continue
 			}
-			if err := sendOrDone(gctx, keysToDelete, idsWithLocation{loc: batch.loc, ids: missing}); err != nil {
+			if err := sendOrDone(gctx, keysToDelete, idsWithLocation{loc: batch.loc, fields: batch.fields, ids: missing}); err != nil {
 				return err
 			}
 		}
@@ -151,54 +155,99 @@ func runDeletePass(ctx context.Context, namespaces []iface.Namespace, st deleteS
 	for _, u := range updates {
 		deletes += len(u)
 	}
-	return updates, passSummary{Namespaces: int(scanned.Load()), Keys: int(keys.Load()), Deletes: deletes}, nil
+	return updates, passSummary{Namespaces: int(scanned.Load()), Keys: int(keys.Load()), Deletes: deletes, Deferred: int(deferred.Load())}, nil
 }
 
-func witnessScan(w Witness, pageSize int) func(context.Context, iface.Namespace, func([]bson.RawValue) error) error {
-	return func(ctx context.Context, ns iface.Namespace, emit func([]bson.RawValue) error) error {
-		if err := w.ScanKeys(ctx, ns, pageSize, emit); err != nil {
+func witnessScan(w Witness, pageSize int) func(context.Context, iface.Namespace, []string, func([][]bson.RawValue) error) error {
+	return func(ctx context.Context, ns iface.Namespace, keyFields []string, emit func([][]bson.RawValue) error) error {
+		buffered := make([][]bson.RawValue, 0, pageSize)
+		err := w.ScanKeys(ctx, ns, keyFields, pageSize, func(page [][]bson.RawValue) error {
+			for _, key := range page {
+				if len(buffered) >= pageSize && canonicalKey(key[0]) != canonicalKey(buffered[len(buffered)-1][0]) {
+					if err := emit(buffered); err != nil {
+						return err
+					}
+					buffered = make([][]bson.RawValue, 0, pageSize)
+				}
+				buffered = append(buffered, key)
+			}
+			return nil
+		})
+		if err != nil {
 			return fmt.Errorf("witness scan of %s.%s: %w", ns.Db, ns.Col, err)
 		}
-		return nil
+		if len(buffered) == 0 {
+			return nil
+		}
+		return emit(buffered)
 	}
 }
 
-func missingSourceKeys(ctx context.Context, client *mongo.Client, loc iface.Location, keys []bson.RawValue) ([]bson.RawValue, error) {
+func distinctIDs(keys [][]bson.RawValue) []bson.RawValue {
+	seen := make(map[string]struct{}, len(keys))
+	var ids []bson.RawValue
+	for _, key := range keys {
+		canonical := canonicalKey(key[0])
+		if _, ok := seen[canonical]; ok {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		ids = append(ids, key[0])
+	}
+	return ids
+}
+
+func missingSourceKeys(ctx context.Context, client *mongo.Client, loc iface.Location, keyFields []string, keys [][]bson.RawValue) ([][]bson.RawValue, int, error) {
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, 0, nil
+	}
+	fail := func(err error) ([][]bson.RawValue, int, error) {
+		return nil, 0, fmt.Errorf("source check of %s.%s: %w", loc.Database, loc.Collection, err)
 	}
 	known := make(map[string]struct{}, len(keys))
-	for _, k := range keys {
-		known[canonicalKey(k)] = struct{}{}
+	pageIDs := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		known[canonicalTuple(key)] = struct{}{}
+		pageIDs[canonicalKey(key[0])] = struct{}{}
 	}
-	opts := options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}})
-	cur, err := client.Database(loc.Database).Collection(loc.Collection).Find(ctx, bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: keys}}}}, opts)
+	opts := options.Find().SetProjection(keyProjection(keyFields))
+	filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: distinctIDs(keys)}}}}
+	cur, err := client.Database(loc.Database).Collection(loc.Collection).Find(ctx, filter, opts)
 	if err != nil {
-		return nil, fmt.Errorf("source check of %s.%s: %w", loc.Database, loc.Collection, err)
+		return fail(err)
 	}
 	defer cur.Close(ctx)
 	present := make(map[string]struct{}, len(keys))
+	undecided := make(map[string]struct{})
 	for cur.Next(ctx) {
-		id, err := cur.Current.LookupErr("_id")
+		tuple, err := keyTuple(cur.Current, keyFields)
 		if err != nil {
-			return nil, fmt.Errorf("source check of %s.%s: document without _id: %w", loc.Database, loc.Collection, err)
+			return fail(err)
 		}
-		key := canonicalKey(id)
-		if _, ok := known[key]; !ok {
-			return nil, fmt.Errorf("source check of %s.%s: source returned an _id matching no witness key of the page", loc.Database, loc.Collection)
+		id := canonicalKey(tuple[0])
+		if _, ok := pageIDs[id]; !ok {
+			return fail(errors.New("source returned a document whose _id matches no witness key of the page"))
 		}
-		present[key] = struct{}{}
+		canonical := canonicalTuple(tuple)
+		if _, ok := known[canonical]; !ok {
+			undecided[id] = struct{}{}
+			continue
+		}
+		present[canonical] = struct{}{}
 	}
 	if err := cur.Err(); err != nil {
-		return nil, fmt.Errorf("source check of %s.%s: %w", loc.Database, loc.Collection, err)
+		return fail(err)
 	}
-	var missing []bson.RawValue
-	for _, k := range keys {
-		if _, ok := present[canonicalKey(k)]; !ok {
-			missing = append(missing, k)
+	var missing [][]bson.RawValue
+	deferred := 0
+	for _, key := range keys {
+		if _, ok := undecided[canonicalKey(key[0])]; ok {
+			deferred++
+		} else if _, ok := present[canonicalTuple(key)]; !ok {
+			missing = append(missing, key)
 		}
 	}
-	return missing, nil
+	return missing, deferred, nil
 }
 
 /****************************************************
@@ -207,8 +256,9 @@ func missingSourceKeys(ctx context.Context, client *mongo.Client, loc iface.Loca
 
 // tuple to store location and a set of id
 type idsWithLocation struct {
-	loc iface.Location
-	ids []bson.RawValue
+	loc    iface.Location
+	fields []string
+	ids    [][]bson.RawValue
 }
 
 // get all database names except system databases

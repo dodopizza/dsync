@@ -55,7 +55,7 @@ func triggerDelete(t *testing.T, force chan<- struct{}) {
 }
 
 func oneDelete(context.Context) (map[iface.Location][]*adiomv1.Update, error) {
-	u, err := deleteUpdate(int32(1))
+	u, err := deleteUpdate(mustKeys(int32(1))[0], nil)
 	if err != nil {
 		return nil, err
 	}

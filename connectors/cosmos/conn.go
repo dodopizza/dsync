@@ -169,7 +169,7 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 	if r.Msg.GetUpdates() {
 		shardKeyFields, err := streamShardKeyFields(ctx, c.client, nsTasks, c.connectorSettings)
 		if err != nil {
-			return nil, shardKeyCheckError(err)
+			return nil, connect.NewError(connect.CodeInternal, err)
 		}
 		tokenMap, err = c.collectResumeTokens(ctx, nsTasks, shardKeyFields)
 		if err != nil {
@@ -380,12 +380,16 @@ func marshalIDPart(name string, value any) (*adiomv1.BsonValue, error) {
 	return &adiomv1.BsonValue{Data: data, Type: uint32(valueType), Name: name}, nil
 }
 
-func deleteUpdate(id any) (*adiomv1.Update, error) {
-	idPart, err := marshalIDPart("_id", id)
+func deleteUpdate(key []bson.RawValue, keyFields []string) (*adiomv1.Update, error) {
+	idPart, err := marshalIDPart("_id", key[0])
 	if err != nil {
 		return nil, err
 	}
-	return &adiomv1.Update{Id: []*adiomv1.BsonValue{idPart}, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE}, nil
+	id := []*adiomv1.BsonValue{idPart}
+	for i, field := range keyFields {
+		id = append(id, &adiomv1.BsonValue{Data: key[i+1].Value, Type: uint32(key[i+1].Type), Name: field})
+	}
+	return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE}, nil
 }
 
 func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate, shardKeyFields []string) (*adiomv1.Update, error) {
@@ -454,7 +458,7 @@ func deleteUpdatesFromIDs(idsToDelete <-chan idsWithLocation) (map[iface.Locatio
 	updatesWithLoc := map[iface.Location][]*adiomv1.Update{}
 	for idWithLoc := range idsToDelete {
 		for i := 0; i < len(idWithLoc.ids) && firstErr == nil; i++ {
-			update, err := deleteUpdate(idWithLoc.ids[i])
+			update, err := deleteUpdate(idWithLoc.ids[i], idWithLoc.fields)
 			if err != nil {
 				firstErr = fmt.Errorf("emulated delete in %s.%s: %w", idWithLoc.loc.Database, idWithLoc.loc.Collection, err)
 				break
@@ -542,7 +546,7 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 
 	shardKeyFields, err := streamShardKeyFields(ctx, c.client, namespaces, c.connectorSettings)
 	if err != nil {
-		return shardKeyCheckError(err)
+		return connect.NewError(connect.CodeInternal, err)
 	}
 
 	run := updatesRun{
@@ -573,11 +577,11 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		run.checkDeletes = func(ctx context.Context) (map[iface.Location][]*adiomv1.Update, error) {
 			var err error
 			var updates map[iface.Location][]*adiomv1.Update
-			updates, summary, err = checkForDeletes(ctx, c.client, c.witness, nss)
+			updates, summary, err = checkForDeletes(ctx, c.client, c.witness, nss, shardKeyFields)
 			return updates, err
 		}
 		run.deletesDone = func() {
-			slog.Info(fmt.Sprintf("Emulated delete pass finished: namespaces=%d keys=%d deletes=%d", summary.Namespaces, summary.Keys, summary.Deletes))
+			slog.Info(fmt.Sprintf("Emulated delete pass finished: namespaces=%d keys=%d deletes=%d deferred=%d", summary.Namespaces, summary.Keys, summary.Deletes, summary.Deferred))
 		}
 	}
 	return run.run(ctx)

@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"connectrpc.com/connect"
 	"github.com/adiom-data/dsync/protocol/iface"
 	"github.com/mitchellh/hashstructure"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -137,15 +136,6 @@ func fetchShardKeyFields(ctx context.Context, client *mongo.Client, location ifa
 	return extractShardKeyFields(collectionInfo)
 }
 
-var errShardedEmulatedDeletes = errors.New("emulated deletes (cosmos-deletes-cdc) cannot be combined with full-document-key on a sharded collection because delete updates carry only _id")
-
-func shardKeyCheckError(err error) error {
-	if errors.Is(err, errShardedEmulatedDeletes) {
-		return connect.NewError(connect.CodeFailedPrecondition, err)
-	}
-	return connect.NewError(connect.CodeInternal, err)
-}
-
 func streamShardKeyFields(ctx context.Context, client *mongo.Client, namespaces []iface.Namespace, settings ConnectorSettings) (map[iface.Namespace][]string, error) {
 	fieldsByNamespace := map[iface.Namespace][]string{}
 	if !settings.FullDocumentKey {
@@ -155,9 +145,6 @@ func streamShardKeyFields(ctx context.Context, client *mongo.Client, namespaces 
 		fields, err := fetchShardKeyFields(ctx, client, iface.Location{Database: ns.Db, Collection: ns.Col})
 		if err != nil {
 			return nil, fmt.Errorf("failed to read the shard key of %s.%s: %w", ns.Db, ns.Col, err)
-		}
-		if settings.EmulateDeletes && len(fields) > 0 {
-			return nil, fmt.Errorf("%s.%s: %w", ns.Db, ns.Col, errShardedEmulatedDeletes)
 		}
 		fieldsByNamespace[ns] = fields
 	}
