@@ -155,7 +155,7 @@ func TestDeleteUpdatesFromIDsReportsMarshalErrorAndDrainsProducer(t *testing.T) 
 	go func() {
 		defer close(exited)
 		defer close(ch)
-		for _, ids := range [][]any{{int32(1), make(chan int), int32(3)}, {int32(4)}, {int32(5)}} {
+		for _, ids := range [][][]bson.RawValue{{mustValues(int32(1)), {{}}, mustValues(int32(3))}, mustKeys(int32(4)), mustKeys(int32(5))} {
 			select {
 			case ch <- idsWithLocation{loc: testLoc, ids: ids}:
 			case <-stop:
@@ -192,13 +192,4 @@ func TestStreamNamespaceEventsPassesShardKeyFieldsIntoEveryId(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Equal(t, []string{"_id", "tenant"}, idNames(out[0].updates[0]))
-}
-
-func TestSourceIdCheckEmitsNoDeletesWhenTheCursorFails(t *testing.T) {
-	client, _ := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), readFailedReply, cursorKilledReply)
-	idsToDelete := make(chan idsWithLocation, 1)
-
-	checkSourceIdsAndGenerateDeletesWorker(t.Context(), client, idsWithLocation{loc: testLoc, ids: []any{int32(1)}}, idsToDelete)
-
-	require.Empty(t, idsToDelete)
 }

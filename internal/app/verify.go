@@ -740,7 +740,7 @@ func runVerify(c *cli.Context) error {
 		<-ctx.Done()
 		stop()
 	}()
-	left, right, _, err := options.ConfigureConnectors(c.Args().Slice(), options.AdditionalSettings{})
+	left, right, _, err := options.ConfigureConnectors(c.Args().Slice(), options.AdditionalSettings{IgnoreWitnessEnv: true})
 	if err != nil {
 		return err
 	}

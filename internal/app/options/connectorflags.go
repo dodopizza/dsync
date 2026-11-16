@@ -1,12 +1,14 @@
 package options
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -28,10 +30,13 @@ import (
 	connectorsv1 "github.com/adiom-data/dsync/gen/adiom/commands/connectors/v1"
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/adiom-data/dsync/gen/adiom/v1/adiomv1connect"
+	"github.com/adiom-data/dsync/internal/util"
 	"github.com/urfave/cli/v2"
 	"github.com/urfave/cli/v2/altsrc"
 	"golang.org/x/net/http2"
 )
+
+const cosmosWitnessPostgresEnv = "DSYNC_COSMOS_DELETES_WITNESS_POSTGRES"
 
 var ErrMissingConnector = errors.New("missing or unsupported connector")
 var ErrHelp = errors.New("connector help used")
@@ -101,7 +106,12 @@ func TeardownConnector(cc ConfiguredConnector) {
 }
 
 type AdditionalSettings struct {
-	BaseThreadCount int
+	BaseThreadCount  int
+	Namespaces       []string
+	Reverse          bool
+	Destination      bool
+	IgnoreWitnessEnv bool
+	witnessUsed      *bool
 }
 
 type RegisteredConnector struct {
@@ -130,6 +140,8 @@ func ConfigureConnectors(args []string, additionalSettings AdditionalSettings) (
 		return src, dst, nil, fmt.Errorf("missing source: %w", ErrMissingConnector)
 	}
 	var dstArgs []string
+	var witnessUsed bool
+	additionalSettings.witnessUsed = &witnessUsed
 	for _, registeredConnector := range registeredConnectors {
 		if registeredConnector.IsConnector(srcArgs[0]) {
 			if registeredConnector.Create != nil {
@@ -160,6 +172,7 @@ func ConfigureConnectors(args []string, additionalSettings AdditionalSettings) (
 		return src, dst, nil, fmt.Errorf("missing destination: %w", ErrMissingConnector)
 	}
 	var restArgs []string
+	additionalSettings.Destination = true
 	for _, registeredConnector := range registeredConnectors {
 		if registeredConnector.IsConnector(dstArgs[0]) {
 			if registeredConnector.Create != nil {
@@ -187,6 +200,11 @@ func ConfigureConnectors(args []string, additionalSettings AdditionalSettings) (
 	if dst.Local == nil && dst.Remote == nil {
 		TeardownConnector(src)
 		return src, dst, nil, fmt.Errorf("unsupported destination: %w", ErrMissingConnector)
+	}
+	if err := checkWitnessTransform(witnessUsed, restArgs); err != nil {
+		TeardownConnector(src)
+		TeardownConnector(dst)
+		return src, dst, nil, err
 	}
 	return src, dst, restArgs, nil
 }
@@ -408,7 +426,11 @@ func GetRegisteredConnectors() []RegisteredConnector {
 					if err != nil {
 						return nil, err
 					}
-					return cosmos.NewConn(cosmosSettingsFromFlags(flags, args[0], as)), nil
+					settings, err := cosmosSettingsFromFlags(flags, args[0], as)
+					if err != nil {
+						return nil, err
+					}
+					return cosmos.NewConn(settings), nil
 				})(args, as)
 			},
 		},
@@ -809,7 +831,7 @@ func mongoSettingsFromFlags(f *connectorsv1.MongoFlags, connString string) mongo
 	return s
 }
 
-func cosmosSettingsFromFlags(f *connectorsv1.CosmosFlags, connString string, as AdditionalSettings) cosmos.ConnectorSettings {
+func cosmosSettingsFromFlags(f *connectorsv1.CosmosFlags, connString string, as AdditionalSettings) (cosmos.ConnectorSettings, error) {
 	s := cosmos.ConnectorSettings{
 		ConnectorSettings:           mongoBaseSettingsFromFlags(f.Mongo, connString),
 		MaxNumNamespaces:            int(f.CosmosReaderMaxNamespaces),
@@ -826,7 +848,56 @@ func cosmosSettingsFromFlags(f *connectorsv1.CosmosFlags, connString string, as 
 		s.EmulateDeletes = true
 		s.WitnessMongoConnString = f.CosmosDeletesCdc
 	}
-	return s
+	if dsn := os.Getenv(cosmosWitnessPostgresEnv); dsn != "" && !as.IgnoreWitnessEnv && (!as.Destination || as.Reverse) {
+		if err := useCosmosPostgresWitness(&s, dsn, as); err != nil {
+			return s, err
+		}
+	}
+	return s, nil
+}
+
+func duplicateTarget(left, right []string) (string, bool) {
+	owners := map[string]string{}
+	for i, target := range right {
+		if !strings.Contains(left[i], ".") || !strings.Contains(target, ".") {
+			continue
+		}
+		if owner, ok := owners[target]; ok && owner != left[i] {
+			return target, true
+		}
+		owners[target] = left[i]
+	}
+	return "", false
+}
+
+func checkWitnessTransform(witnessUsed bool, restArgs []string) error {
+	if witnessUsed && len(restArgs) > 0 {
+		return fmt.Errorf("%s cannot be used with a transform: %w", cosmosWitnessPostgresEnv, ErrInvalidUsage)
+	}
+	return nil
+}
+
+func useCosmosPostgresWitness(s *cosmos.ConnectorSettings, dsn string, as AdditionalSettings) error {
+	if s.WitnessMongoConnString != "" {
+		return fmt.Errorf("--cosmos-deletes-cdc and %s cannot be used together: %w", cosmosWitnessPostgresEnv, ErrInvalidUsage)
+	}
+	if as.Reverse {
+		return fmt.Errorf("%s cannot be used with --reverse: %w", cosmosWitnessPostgresEnv, ErrInvalidUsage)
+	}
+	left, right := util.NamespaceSplit(as.Namespaces, ":")
+	if target, ok := duplicateTarget(left, right); ok {
+		return fmt.Errorf("%s: namespaces share the target %s: %w", cosmosWitnessPostgresEnv, target, ErrInvalidUsage)
+	}
+	witness, err := postgres.NewKeyLister(context.Background(), dsn, util.Mapify(left, right))
+	if err != nil {
+		return fmt.Errorf("%s: %w", cosmosWitnessPostgresEnv, err)
+	}
+	s.EmulateDeletes = true
+	s.Witness = witness
+	if as.witnessUsed != nil {
+		*as.witnessUsed = true
+	}
+	return nil
 }
 
 func fakeSourceFromFlags(f *connectorsv1.FakeSourceFlags) (adiomv1connect.ConnectorServiceHandler, error) {

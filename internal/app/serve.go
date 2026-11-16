@@ -76,7 +76,7 @@ func runServe(c *cli.Context) error {
 		if registeredConnector.IsConnector(args[0]) {
 			if registeredConnector.Create != nil {
 				var err error
-				connector, _, err = registeredConnector.Create(args, options.AdditionalSettings{})
+				connector, _, err = registeredConnector.Create(args, options.AdditionalSettings{IgnoreWitnessEnv: true})
 				if err != nil {
 					return fmt.Errorf("error creating connector")
 				}

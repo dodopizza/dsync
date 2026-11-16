@@ -208,13 +208,14 @@ func TestStreamUpdatesStopsWhenTheShardKeyCannotBeRead(t *testing.T) {
 	require.Equal(t, []string{"customAction"}, commands)
 }
 
-func TestStreamUpdatesRejectsEmulatedDeletesWithFullDocumentKeyOnShardedNamespace(t *testing.T) {
-	err, commands := streamUpdatesFor(t, withFlags(true, true), shardedReply)
+func TestEmulatedDeletesWithFullDocumentKeyAreAllowedOnShardedNamespace(t *testing.T) {
+	client, _ := recordingClient(t, shardedReply)
+	ns := iface.Namespace{Db: "db", Col: "col"}
 
-	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
-	require.ErrorContains(t, err, "full-document-key")
-	require.ErrorContains(t, err, "cosmos-deletes-cdc")
-	require.Equal(t, []string{"customAction"}, commands)
+	fields, err := streamShardKeyFields(t.Context(), client, []iface.Namespace{ns}, withFlags(true, true))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"tenant"}, fields[ns])
 }
 
 func TestEmulatedDeletesWithFullDocumentKeyAreAllowedOnUnshardedNamespace(t *testing.T) {

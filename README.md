@@ -125,6 +125,39 @@ GRANT USAGE ON SCHEMA dsync_state TO dsync_state_writer;
 GRANT SELECT, INSERT, UPDATE, DELETE ON dsync_state.objects TO dsync_state_writer;
 ```
 
+## Cosmos DB deletes
+
+Cosmos DB for MongoDB change streams carry no deletes. When enabled, dsync finds deletes with a periodic pass: it reads the keys the destination holds (the witness) and looks each page of them up in the source. A key that the destination holds and the source lacks becomes a delete. A pass compares key sets, not counts, so a delete followed by an insert is found.
+* Two ways to enable it. They exclude each other: setting both stops dsync at startup with a usage error.
+    * `--cosmos-deletes-cdc <mongodb uri>`: a MongoDB witness. It does not apply `--namespace`: it must hold the database and collection names of the source. With a mapping to other names it finds no keys and emits no deletes, without an error.
+    * The environment variable `DSYNC_COSMOS_DELETES_WITNESS_POSTGRES`, set to the PostgreSQL connection string of the destination (`postgres://USER:PASSWORD@HOST:5432/DB`). Keys are read from the document-mode tables. The value is read only from the environment: there is no flag. It is never printed. dsync runs only read statements on it and no DDL. Errors of the witness connection can show the host, user and database name, never the password.
+* The PostgreSQL witness needs:
+    * The destination in document mode, with the primary key of each table made of `id` plus one column per shard key field, each column named like the field. Shard key fields take part only with `--full-document-key`. Without it the primary key must be `id` alone.
+    * The same `--namespace` mapping as the sink: it finds the table of each namespace. Only the PostgreSQL witness applies the mapping.
+    * Each table must hold the rows of exactly one source namespace. The pass deletes every row it finds in the table that the source does not have, including rows loaded beforehand or written by another flow. Two namespaces that resolve to one table are refused: explicit duplicates (`db.col:schema.table` twice with different sources) fail at start-up, and any other collision, such as prefix mappings with equal collection names, ends the first pass with an error and sends no deletes.
+    * A role that has `USAGE` on the schema and `SELECT` on each table, plus `CONNECT` on the database if it was revoked from `PUBLIC` (grant example below).
+    * No `--reverse`, and no transform (the trailing `grpc://` argument). With either, dsync stops at startup with a usage error naming the variable.
+    * The variable is ignored when the Cosmos DB connector is the destination.
+* The witness reads `_id` and the shard key fields from the stored `doc`, so they keep their BSON types. The `id` column only orders the rows and must match `doc._id`.
+* `--cosmos-delete-interval` sets the time between passes. The default is 60 s. The first pass runs one interval after the update stream starts, and each later pass one interval after the previous one finished.
+* Cost: every pass reads the `doc` of every row of every namespace (large documents are stored out of line and are decompressed) and looks each page of 1000 keys up in the source, which uses request units. The witness read is one statement per namespace that stays open for the scan of that namespace, which holds back vacuum cleanup on that server meanwhile. `ORDER BY id` can avoid a sort when an index whose leading column is `id` exists (for example the primary key in that order); otherwise PostgreSQL sorts the table on every pass.
+* Log line after each pass: `Emulated delete pass finished: namespaces=N keys=N deletes=N deferred=N`.
+* Cutover: stop writes to the source, restart dsync with the witness enabled, wait for a pass that reports `deletes=0 deferred=0` after the stream has caught up, then run `verify --once` for the verdict (`verify` ignores `DSYNC_COSMOS_DELETES_WITNESS_POSTGRES`, so it need not be unset). The restart resumes from the checkpoint only under the conditions in the next paragraph. With a shard key field that holds a subdocument, a constant non-zero `deferred` is expected (see `deferred` below).
+* Stop writes because a pass reads the witness and the source at different moments. One interleaving can delete a live document while the stream is still applying changes: a document is deleted in the source, a pass reads the source and finds it missing, the document is inserted again, the stream applies that insert, and only then the pass sends its delete. The delete removes the row, and the document stays missing from the destination until it changes again. A document that is deleted and inserted again between the witness read and the source read is not deleted.
+* Any error in a pass (witness or source read, throttling, timeout) ends the stream with that error, and the pass sends no deletes. Restart dsync. It resumes from the last checkpoint only when a persistent state store (`--metadata` or `DSYNC_METADATA_POSTGRES`) has been used since the original run and the flow stays the same. The flow is identified by the connector ids of the source and the destination (for MongoDB and Cosmos DB a hash of the connection string and the source query, if set, unless `--flow-name` is set), the `--namespace` list and the sync mode. Without a persistent store the temporary store keeps nothing, and a restart begins a fresh plan.
+* `deferred` counts witness keys that were not judged. It happens when the `_id` exists in the source under another shard key value. Such keys are not deleted in that pass, and a real delete of one of them is held back while the `_id` stays deferred. A count that stays above zero across passes can mean:
+    * the stream lags behind the source;
+    * the same `_id` lives under several shard key values in the source while the destination row holds one;
+    * a shard key field holds a subdocument: jsonb does not keep key order, so the value read from PostgreSQL differs from the source.
+* If an `_id` is numeric in both places but of different BSON families (for example Decimal128 in the source and an integer in the witness), every pass aborts with an error.
+
+Grant example for the witness role (`dsync_witness`, `appdb` and `public.items` are placeholders; the first line is needed only if `CONNECT` was revoked from `PUBLIC`):
+```sql
+GRANT CONNECT ON DATABASE appdb TO dsync_witness;
+GRANT USAGE ON SCHEMA public TO dsync_witness;
+GRANT SELECT ON public.items TO dsync_witness;
+```
+
 ## Verify
 
 `dsync verify [verify flags] <left> [left connector flags] <right> [right connector flags]` compares two connectors document by document. It reads both sides, keeps comparing while their change streams run, and reports mismatches. Documents are matched by `_id` only. Verify flags (`--namespaces`, `--once`, `--latency`, `--simple` and so on) go first: flag parsing stops at the first connector, and flags after it belong to that connector.

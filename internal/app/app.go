@@ -119,6 +119,8 @@ func runDsync(c *cli.Context) error {
 	if o.LoadLevel != "" {
 		additionalSettings.BaseThreadCount = runner.GetBaseThreadCount(o.LoadLevel)
 	}
+	additionalSettings.Namespaces = o.NamespaceFrom
+	additionalSettings.Reverse = o.Reverse
 	src, dst, restArgs, err := options.ConfigureConnectors(c.Args().Slice(), additionalSettings)
 	if err != nil {
 		if errors.Is(err, options.ErrMissingConnector) {

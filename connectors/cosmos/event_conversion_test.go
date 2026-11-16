@@ -41,12 +41,12 @@ func TestUpdateFromEventWithoutFullDocumentIsEmptyPartialUpdate(t *testing.T) {
 }
 
 func TestDeleteUpdateRejectsUnmarshalableID(t *testing.T) {
-	update, err := deleteUpdate(make(chan int))
+	update, err := deleteUpdate([]bson.RawValue{{}}, nil)
 
 	require.Error(t, err)
 	require.Nil(t, update)
 
-	update, err = deleteUpdate("a")
+	update, err = deleteUpdate(mustKeys("a")[0], nil)
 	require.NoError(t, err)
 	require.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_DELETE, update.GetType())
 }

@@ -112,12 +112,12 @@ func planWithUpdates(t *testing.T, settings ConnectorSettings, updates bool, res
 	return err, *commands
 }
 
-func TestGeneratePlanRejectsEmulatedDeletesWithFullDocumentKeyBeforeAnyOtherCommand(t *testing.T) {
+func TestGeneratePlanOnAShardedNamespaceNoLongerFailsWithTheEmulatedDeletesRejection(t *testing.T) {
 	err, commands := planWithUpdates(t, withFlags(true, true), true, shardedReply, countReply)
 
-	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
-	require.ErrorContains(t, err, "cosmos-deletes-cdc")
-	require.Equal(t, []string{"customAction"}, commands)
+	require.NotContains(t, err.Error(), "cosmos-deletes-cdc")
+	require.Equal(t, "customAction", commands[0])
+	require.Greater(t, len(commands), 1)
 }
 
 func TestGeneratePlanFailsWhenTheShardKeyCannotBeRead(t *testing.T) {
