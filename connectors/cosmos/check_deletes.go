@@ -8,6 +8,7 @@ package cosmos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -179,6 +180,11 @@ func checkSourceIdsAndGenerateDeletesWorker(ctx context.Context, client *mongo.C
 
 		// convert result to array
 		missingIds = []interface{}(res["missingIds"].(bson.A))
+	} else if err := cur.Err(); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			slog.Error(fmt.Sprintf("Failed to read missing ids for %v: %v", idsWithLoc.loc, err))
+		}
+		return
 	} else {
 		slog.Debug(fmt.Sprintf("Missing ids source query returned nothing for %v", idsWithLoc.loc))
 		//this means all are missing on the source!

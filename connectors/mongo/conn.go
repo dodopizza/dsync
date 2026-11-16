@@ -1754,8 +1754,11 @@ func mongoIDPart(id []*adiomv1.BsonValue) *adiomv1.BsonValue {
 	if len(id) == 0 {
 		return nil
 	}
-	// The BSON ID contract places MongoDB's _id last. Single-part legacy IDs
-	// are therefore handled by the same rule without relying on the name.
+	for _, part := range id {
+		if part.GetName() == "_id" {
+			return part
+		}
+	}
 	return id[len(id)-1]
 }
 

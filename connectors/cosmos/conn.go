@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -136,16 +138,25 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		}
 	}
 
+	tokenMap := NewTokenMap()
+	if r.Msg.GetUpdates() {
+		shardKeyFields, err := streamShardKeyFields(ctx, c.client, nsTasks, c.connectorSettings)
+		if err != nil {
+			return nil, shardKeyCheckError(err)
+		}
+		tokenMap, err = c.collectResumeTokens(ctx, nsTasks, shardKeyFields)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+	}
+
 	if r.Msg.GetInitialSync() {
 		p := planner{
 			Ctx:      ctx,
 			Client:   c.client,
 			settings: c.connectorSettings,
 		}
-		partitionedTasks, err := p.partitionTasksIfNecessary(nsTasks)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
+		partitionedTasks := p.partitionTasksIfNecessary(nsTasks)
 		if len(nsTasks) > 1 {
 			shuffleTasks(partitionedTasks)
 		}
@@ -170,32 +181,6 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		partitions = initialPartitions
 	}
 
-	tokenMap := NewTokenMap()
-
-	//create resume token for each task
-	wg := sync.WaitGroup{}
-	var cleanupErr error
-	var cleanupErrOnce sync.Once
-	for _, nsTask := range nsTasks {
-		wg.Add(1)
-		go func(ns iface.Namespace) {
-			defer wg.Done()
-			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
-			resumeToken, err := getLatestResumeToken(ctx, c.client, loc, c.connectorSettings.WithDelete)
-			if err != nil {
-				slog.Error(fmt.Sprintf("Failed to get latest resume token for namespace %v: %v", ns, err))
-				if errors.Is(err, errDummyRecordCleanup) {
-					cleanupErrOnce.Do(func() { cleanupErr = err })
-				}
-				return
-			}
-			tokenMap.AddToken(loc, resumeToken)
-		}(nsTask)
-	}
-	wg.Wait()
-	if cleanupErr != nil {
-		return nil, connect.NewError(connect.CodeInternal, cleanupErr)
-	}
 	slog.Debug(fmt.Sprintf("Read Plan Resume token map: %v", tokenMap.Map))
 	//serialize the resume token map
 	resumeToken, err := tokenMap.encodeMap()
@@ -214,6 +199,37 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		Partitions:        partitions,
 		UpdatesPartitions: []*adiomv1.UpdatesPartition{{Namespaces: updatesNamespaces, Cursor: encodedResumeToken}},
 	}), nil
+}
+
+func (c *conn) collectResumeTokens(ctx context.Context, nsTasks []iface.Namespace, shardKeyFields map[iface.Namespace][]string) (*TokenMap, error) {
+	tokenMap := NewTokenMap()
+	wg := sync.WaitGroup{}
+	tokenErrs := make([]error, len(nsTasks))
+	for i, ns := range nsTasks {
+		wg.Go(func() {
+			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
+			fields, ok := shardKeyFields[ns]
+			if !ok {
+				var err error
+				if fields, err = fetchShardKeyFields(ctx, c.client, loc); err != nil {
+					tokenErrs[i] = fmt.Errorf("resume token for %s.%s: %w", ns.Db, ns.Col, err)
+					return
+				}
+			}
+			resumeToken, err := getLatestResumeToken(ctx, c.client, loc, c.connectorSettings.WithDelete, fields)
+			if err != nil {
+				tokenErrs[i] = fmt.Errorf("resume token for %s.%s: %w", ns.Db, ns.Col, err)
+				return
+			}
+			tokenMap.AddToken(loc, resumeToken)
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(tokenErrs...); err != nil {
+		slog.Error(fmt.Sprintf("Failed to get resume tokens: %v", err))
+		return nil, err
+	}
+	return tokenMap, nil
 }
 
 // GetInfo implements adiomv1connect.ConnectorServiceHandler.
@@ -327,55 +343,95 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 	return nil
 }
 
-func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate) (*adiomv1.Update, error) {
-	//slog.Debug(fmt.Sprintf("Converting change stream event %v", change))
-
-	// get the id of the document that was changed
-	var idType bson.Type
-	var idVal []byte
-	for _, k := range change.DocumentKey {
-		if k.Key == "_id" {
-			var err error
-			idType, idVal, err = bson.MarshalValue(k.Value)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal _id: %v", err)
-			}
-			break
-		}
+func updateFromEvent(decode func(any) error, shardKeyFields []string) (*adiomv1.Update, error) {
+	var change mongoconn.MongoUpdate
+	if err := decode(&change); err != nil {
+		return nil, fmt.Errorf("failed to decode change stream event: %w", err)
 	}
-	if idVal == nil {
-		return nil, fmt.Errorf("_id not found in documentKey")
-	}
-
-	if change.OperationType == "delete" {
-		return &adiomv1.Update{
-			Id: []*adiomv1.BsonValue{{
-				Data: idVal,
-				Type: uint32(idType),
-				Name: "_id",
-			}},
-			Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE,
-		}, nil
-	}
-
-	// get the full state of the document after the change
-	if len(change.FullDocument) == 0 {
-		//TODO (AK, 6/2024): find a better way to report that we need to ignore this event
-		return nil, nil // no full document, nothing to do (probably got deleted before we got to the event in the change stream)
-	}
-	update := &adiomv1.Update{
-		Id: []*adiomv1.BsonValue{{
-			Data: idVal,
-			Type: uint32(idType),
-			Name: "_id",
-		}},
-		Type: adiomv1.UpdateType_UPDATE_TYPE_UPDATE,
-		Data: change.FullDocument,
+	update, err := convertChangeStreamEventToUpdate(change, shardKeyFields)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert change stream event: %w", err)
 	}
 	return update, nil
 }
 
-func checkForDeletes(ctx context.Context, client *mongo.Client, witnessClient *mongo.Client, namespaces []iface.Namespace) map[iface.Location][]*adiomv1.Update {
+func marshalIDPart(name string, value any) (*adiomv1.BsonValue, error) {
+	valueType, data, err := bson.MarshalValue(value)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %v: %w", name, err)
+	}
+	return &adiomv1.BsonValue{Data: data, Type: uint32(valueType), Name: name}, nil
+}
+
+func deleteUpdate(id any) (*adiomv1.Update, error) {
+	idPart, err := marshalIDPart("_id", id)
+	if err != nil {
+		return nil, err
+	}
+	return &adiomv1.Update{Id: []*adiomv1.BsonValue{idPart}, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE}, nil
+}
+
+func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate, shardKeyFields []string) (*adiomv1.Update, error) {
+	idIndex := slices.IndexFunc(change.DocumentKey, func(e bson.E) bool { return e.Key == "_id" })
+	if idIndex < 0 || change.DocumentKey[idIndex].Value == nil {
+		return nil, fmt.Errorf("_id not found in documentKey")
+	}
+	idPart, err := marshalIDPart("_id", change.DocumentKey[idIndex].Value)
+	if err != nil {
+		return nil, err
+	}
+	id := []*adiomv1.BsonValue{idPart}
+
+	if change.OperationType != "delete" && len(change.FullDocument) == 0 {
+		return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE}, nil
+	}
+	shardKeyParts, err := shardKeyIdParts(change, shardKeyFields)
+	if err != nil {
+		return nil, err
+	}
+	id = append(id, shardKeyParts...)
+
+	if change.OperationType == "delete" {
+		return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE}, nil
+	}
+	return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_UPDATE, Data: change.FullDocument}, nil
+}
+
+func shardKeyIdParts(change mongoconn.MongoUpdate, shardKeyFields []string) ([]*adiomv1.BsonValue, error) {
+	parts := make([]*adiomv1.BsonValue, 0, len(shardKeyFields))
+	for _, field := range shardKeyFields {
+		part, err := shardKeyIdPart(change, field)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
+	}
+	return parts, nil
+}
+
+func shardKeyIdPart(change mongoconn.MongoUpdate, field string) (*adiomv1.BsonValue, error) {
+	if len(change.FullDocument) > 0 {
+		if value, err := change.FullDocument.LookupErr(strings.Split(field, ".")...); err == nil {
+			return &adiomv1.BsonValue{Data: value.Value, Type: uint32(value.Type), Name: field}, nil
+		}
+	}
+	for _, k := range change.DocumentKey {
+		if k.Key != field {
+			continue
+		}
+		if k.Value == nil {
+			return &adiomv1.BsonValue{Type: uint32(bson.TypeNull), Name: field}, nil
+		}
+		part, err := marshalIDPart(field, k.Value)
+		if err != nil {
+			return nil, fmt.Errorf("shard key field: %w", err)
+		}
+		return part, nil
+	}
+	return nil, fmt.Errorf("shard key field %v is in neither fullDocument nor documentKey", field)
+}
+
+func checkForDeletes(ctx context.Context, client *mongo.Client, witnessClient *mongo.Client, namespaces []iface.Namespace) (map[iface.Location][]*adiomv1.Update, error) {
 	// Preparations
 	mismatchedNamespaces := make(chan iface.Namespace)
 	idsToCheck := make(chan idsWithLocation)  //channel to post ids to check
@@ -389,29 +445,72 @@ func checkForDeletes(ctx context.Context, client *mongo.Client, witnessClient *m
 	go checkSourceIdsAndGenerateDeletes(ctx, client, idsToCheck, idsToDelete)
 
 	// 3. Generate delete events
+	return deleteUpdatesFromIDs(idsToDelete)
+}
+
+func deleteUpdatesFromIDs(idsToDelete <-chan idsWithLocation) (map[iface.Location][]*adiomv1.Update, error) {
 	var count uint64
+	var firstErr error
 	updatesWithLoc := map[iface.Location][]*adiomv1.Update{}
 	for idWithLoc := range idsToDelete {
-		for i := 0; i < len(idWithLoc.ids); i++ {
-			// convert id to raw bson
-			idType, idVal, err := bson.MarshalValue(idWithLoc.ids[i])
+		for i := 0; i < len(idWithLoc.ids) && firstErr == nil; i++ {
+			update, err := deleteUpdate(idWithLoc.ids[i])
 			if err != nil {
-				slog.Error(fmt.Sprintf("failed to marshal _id: %v", err))
+				firstErr = fmt.Errorf("emulated delete in %s.%s: %w", idWithLoc.loc.Database, idWithLoc.loc.Collection, err)
+				break
 			}
-			updatesWithLoc[idWithLoc.loc] = append(updatesWithLoc[idWithLoc.loc], &adiomv1.Update{
-				Id: []*adiomv1.BsonValue{{
-					Data: idVal,
-					Type: uint32(idType),
-					Name: "_id",
-				}},
-				Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE,
-			})
+			updatesWithLoc[idWithLoc.loc] = append(updatesWithLoc[idWithLoc.loc], update)
 
 			count += 1
 		}
 	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
 	slog.Debug(fmt.Sprintf("Generated %v delete messages", count))
-	return updatesWithLoc
+	return updatesWithLoc, nil
+}
+
+func deliverEmulatedDeletes(check func() (map[iface.Location][]*adiomv1.Update, error), send func(iface.Location, []*adiomv1.Update) error) error {
+	updatesMap, err := check()
+	if err != nil {
+		return err
+	}
+	for loc, updates := range updatesMap {
+		if err := send(loc, updates); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type eventStream interface {
+	Next(context.Context) bool
+	Decode(any) error
+	RemainingBatchLength() int
+	ResumeToken() bson.Raw
+	Err() error
+}
+
+func streamNamespaceEvents(ctx context.Context, stream eventStream, loc iface.Location, shardKeyFields []string, flush func([]*adiomv1.Update, bson.Raw) error) error {
+	var updates []*adiomv1.Update
+	for stream.Next(ctx) {
+		update, err := updateFromEvent(stream.Decode, shardKeyFields)
+		if err != nil {
+			return fmt.Errorf("%s.%s: %w", loc.Database, loc.Collection, err)
+		}
+		updates = append(updates, update)
+		if stream.RemainingBatchLength() == 0 {
+			if err := flush(updates, stream.ResumeToken()); err != nil {
+				return err
+			}
+			updates = nil
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return fmt.Errorf("update change stream for %s.%s failed: %w", loc.Database, loc.Collection, err)
+	}
+	return nil
 }
 
 // StreamUpdates implements adiomv1connect.ConnectorServiceHandler.
@@ -441,6 +540,11 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		namespaces = append(namespaces, ns)
 	}
 
+	shardKeyFields, err := streamShardKeyFields(ctx, c.client, namespaces, c.connectorSettings)
+	if err != nil {
+		return shardKeyCheckError(err)
+	}
+
 	var sendMutex sync.Mutex
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -468,33 +572,32 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 			runDelete := func() {
 				// check for deletes
 				slog.Debug("Checking for deletes")
-				updatesMap := checkForDeletes(streamCtx, c.client, c.witnessMongoClient, nss)
-				for loc, updates := range updatesMap {
+				err := deliverEmulatedDeletes(func() (map[iface.Location][]*adiomv1.Update, error) {
+					return checkForDeletes(streamCtx, c.client, c.witnessMongoClient, nss)
+				}, func(loc iface.Location, updates []*adiomv1.Update) error {
 					c.deletesCount.Add(uint64(len(updates)))
 					encodedToken, err := tokenMap.encodeMap()
 					if err != nil {
-						reportError(fmt.Errorf("failed to encode emulated-delete token map: %w", err))
-						return
+						return fmt.Errorf("failed to encode emulated-delete token map: %w", err)
 					}
 					nextCursor, err := encodeResumeToken(readPlanStartAt, encodedToken)
 					if err != nil {
-						reportError(fmt.Errorf("failed to encode emulated-delete cursor: %w", err))
-						return
+						return fmt.Errorf("failed to encode emulated-delete cursor: %w", err)
 					}
 					sendMutex.Lock()
-					err = s.Send(&adiomv1.StreamUpdatesResponse{
+					defer sendMutex.Unlock()
+					if err := s.Send(&adiomv1.StreamUpdatesResponse{
 						Updates:    updates,
 						Namespace:  fmt.Sprintf("%v.%v", loc.Database, loc.Collection),
 						NextCursor: nextCursor,
-					})
-					sendMutex.Unlock()
-					if err != nil {
-						if errors.Is(err, context.Canceled) {
-							return
-						}
-						reportError(fmt.Errorf("failed to send emulated deletes: %w", err))
-						return
+					}); err != nil {
+						return fmt.Errorf("failed to send emulated deletes: %w", err)
 					}
+					return nil
+				})
+				if err != nil {
+					reportError(err)
+					return
 				}
 				ticker.Reset(c.connectorSettings.DeletesCheckInterval)
 			}
@@ -528,58 +631,28 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 			}
 			defer changeStream.Close(streamCtx)
 
-			var updates []*adiomv1.Update
-
-			for changeStream.Next(streamCtx) {
-				var change mongoconn.MongoUpdate
-				if err := changeStream.Decode(&change); err != nil {
-					slog.Error(fmt.Sprintf("Failed to decode change stream event: %v", err))
-					continue
-				}
-
-				update, err := convertChangeStreamEventToUpdate(change)
+			err = streamNamespaceEvents(streamCtx, changeStream, loc, shardKeyFields[ns], func(updates []*adiomv1.Update, token bson.Raw) error {
+				tokenMap.AddToken(loc, token)
+				encodedToken, err := tokenMap.encodeMap()
 				if err != nil {
-					slog.Error(fmt.Sprintf("Failed to convert change stream event to data message: %v", err))
-					continue
+					return fmt.Errorf("failed to encode update token map: %w", err)
 				}
-				if update == nil {
-					continue
+				nextCursor, err := encodeResumeToken(readPlanStartAt, encodedToken)
+				if err != nil {
+					return fmt.Errorf("failed to encode update cursor: %w", err)
 				}
-
-				updates = append(updates, update)
-
-				if changeStream.RemainingBatchLength() == 0 {
-					tokenMap.AddToken(loc, changeStream.ResumeToken())
-					encodedToken, err := tokenMap.encodeMap()
-					if err != nil {
-						reportError(fmt.Errorf("failed to encode update token map: %w", err))
-						return
-					}
-					nextCursor, err := encodeResumeToken(readPlanStartAt, encodedToken)
-					if err != nil {
-						reportError(fmt.Errorf("failed to encode update cursor: %w", err))
-						return
-					}
-					sendMutex.Lock()
-					err = s.Send(&adiomv1.StreamUpdatesResponse{
-						Updates:    updates,
-						Namespace:  fmt.Sprintf("%v.%v", ns.Db, ns.Col),
-						NextCursor: nextCursor,
-					})
-					sendMutex.Unlock()
-					if err != nil {
-						if errors.Is(err, context.Canceled) {
-							return
-						}
-						reportError(fmt.Errorf("failed to send updates for %s.%s: %w", loc.Database, loc.Collection, err))
-						return
-					}
-					updates = nil
+				sendMutex.Lock()
+				defer sendMutex.Unlock()
+				if err := s.Send(&adiomv1.StreamUpdatesResponse{
+					Updates:    updates,
+					Namespace:  fmt.Sprintf("%v.%v", ns.Db, ns.Col),
+					NextCursor: nextCursor,
+				}); err != nil {
+					return fmt.Errorf("failed to send updates for %s.%s: %w", loc.Database, loc.Collection, err)
 				}
-			}
-			if err := changeStream.Err(); err != nil {
-				reportError(fmt.Errorf("update change stream for %s.%s failed: %w", loc.Database, loc.Collection, err))
-			}
+				return nil
+			})
+			reportError(err)
 		}()
 	}
 	wg.Wait()

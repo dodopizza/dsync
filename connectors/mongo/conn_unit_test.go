@@ -51,6 +51,29 @@ func TestMongoIDPartUsesLastPart(t *testing.T) {
 	}
 }
 
+func TestMongoIDPartByName(t *testing.T) {
+	shard := bsonID(t, "tenant", "acme")
+	id := bsonID(t, "_id", "item")
+	unnamedA := &adiomv1.BsonValue{Type: id.Type, Data: id.Data}
+	unnamedB := &adiomv1.BsonValue{Type: shard.Type, Data: shard.Data}
+	tests := []struct {
+		name string
+		in   []*adiomv1.BsonValue
+		want *adiomv1.BsonValue
+	}{
+		{"id first", []*adiomv1.BsonValue{id, shard}, id},
+		{"id last", []*adiomv1.BsonValue{shard, id}, id},
+		{"unnamed returns last", []*adiomv1.BsonValue{unnamedA, unnamedB}, unnamedB},
+		{"single", []*adiomv1.BsonValue{unnamedA}, unnamedA},
+		{"empty", nil, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Same(t, tc.want, mongoIDPart(tc.in))
+		})
+	}
+}
+
 func TestPlanningFanoutLimit(t *testing.T) {
 	assert.Equal(t, defaultNamespaceFanoutLimit, (&conn{flavor: FlavorMongoDB}).planningFanoutLimit())
 	assert.Equal(t, defaultNamespaceFanoutLimit, (&conn{flavor: FlavorDocumentDB}).planningFanoutLimit())
@@ -385,14 +408,14 @@ func TestSamplePipeline_MatchesQueryAfterSample(t *testing.T) {
 		{{"$sample", bson.D{{"size", int64(10)}}}},
 		{{"$match", q}},
 		{{"$project", bson.D{{"_id", 1}}}},
-	}, samplePipeline(10, q))
+	}, SamplePipeline(10, q))
 }
 
 func TestSamplePipeline_NoQuery(t *testing.T) {
 	assert.Equal(t, mongo.Pipeline{
 		{{"$sample", bson.D{{"size", int64(1)}}}},
 		{{"$project", bson.D{{"_id", 1}}}},
-	}, samplePipeline(1, nil))
+	}, SamplePipeline(1, nil))
 }
 
 func TestIDTypeAliasesCoverOrdinaryIDTypes(t *testing.T) {

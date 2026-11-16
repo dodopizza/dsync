@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/adiom-data/dsync/protocol/iface"
 	"github.com/mitchellh/hashstructure"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -52,7 +53,7 @@ func generateConnectorID(connectionString string) iface.ConnectorID {
 	return iface.ConnectorID(strconv.FormatUint(id, 16))
 }
 
-func getLatestResumeToken(ctx context.Context, client *mongo.Client, location iface.Location, withDelete bool) (resumeToken bson.Raw, retErr error) {
+func getLatestResumeToken(ctx context.Context, client *mongo.Client, location iface.Location, withDelete bool, shardKeyFields []string) (resumeToken bson.Raw, retErr error) {
 	slog.Debug(fmt.Sprintf("Getting latest resume token for location: %v\n", location))
 	opts := moptions.ChangeStream().SetFullDocument(moptions.UpdateLookup)
 	changeStream, err := createChangeStream(ctx, client, location, opts, withDelete)
@@ -64,25 +65,13 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 	// we need ANY event to get the resume token that we can use to extract the cluster time
 	col := client.Database(location.Database).Collection(location.Collection)
 
-	cmdResult := client.Database(location.Database).RunCommand(ctx, bson.D{{"customAction", "GetCollection"}, {"collection", location.Collection}})
-	if cmdResult.Err() != nil {
-		return nil, fmt.Errorf("Error retrieving possible shardKeyDefinition %v", cmdResult.Err())
-	}
-	var collectionInfo bson.Raw
-	if err := cmdResult.Decode(&collectionInfo); err != nil {
-		return nil, fmt.Errorf("error decoding possible shardKeyDefinition: %w", err)
-	}
-	shardKeyFields, err := extractShardKeyFields(collectionInfo)
-	if err != nil {
-		return nil, err
-	}
 	dummyInsertFilter := makeDummyDocument(shardKeyFields)
 	slog.Debug("Dummy Insert", "filter", dummyInsertFilter)
 
 	result, err := col.InsertOne(ctx, dummyInsertFilter)
 	if err != nil {
 		if isUnauthorizedWrite(err) {
-			return resumeTokenWithoutDummyRecord(ctx, changeStream, location), nil
+			return resumeTokenWithoutDummyRecord(ctx, changeStream, location)
 		}
 		return nil, fmt.Errorf("failed to insert dummy record: %w", err)
 	}
@@ -92,7 +81,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if _, deleteErr := col.DeleteOne(cleanupCtx, deleteFilter); deleteErr != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("%w for %s.%s: %w", errDummyRecordCleanup, location.Database, location.Collection, deleteErr))
+			retErr = errors.Join(retErr, fmt.Errorf("%w: %w", errDummyRecordCleanup, deleteErr))
 		}
 	}()
 
@@ -123,7 +112,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 // A read-only key cannot insert the dummy record. The change stream was still
 // opened before the copy starts, so its own position is an equally safe start,
 // and unlike a start by timestamp it works on accounts with merged partitions.
-func resumeTokenWithoutDummyRecord(ctx context.Context, changeStream *mongo.ChangeStream, location iface.Location) bson.Raw {
+func resumeTokenWithoutDummyRecord(ctx context.Context, changeStream *mongo.ChangeStream, location iface.Location) (bson.Raw, error) {
 	// The driver's first TryNext only consumes the batch returned when the stream
 	// was opened; the second one is the first to ask the server for more.
 	for attempt := 0; attempt < 2 && changeStream.ResumeToken() == nil; attempt++ {
@@ -131,10 +120,48 @@ func resumeTokenWithoutDummyRecord(ctx context.Context, changeStream *mongo.Chan
 	}
 	if token := changeStream.ResumeToken(); token != nil {
 		slog.Info(fmt.Sprintf("Not authorized to insert dummy record for %v, using the resume token of the open change stream - is the namespace read-only?", location))
-		return token
+		return token, nil
 	}
-	slog.Warn(fmt.Sprintf("Not authorized to insert dummy record for %v and the open change stream gave no resume token, the change stream will start by timestamp - is the namespace read-only?", location), "err", changeStream.Err())
-	return nil
+	return nil, errors.Join(fmt.Errorf("not authorized to insert dummy record and the open change stream gave no resume token - is the namespace read-only?"), changeStream.Err())
+}
+
+func fetchShardKeyFields(ctx context.Context, client *mongo.Client, location iface.Location) ([]string, error) {
+	cmdResult := client.Database(location.Database).RunCommand(ctx, bson.D{{"customAction", "GetCollection"}, {"collection", location.Collection}})
+	if cmdResult.Err() != nil {
+		return nil, fmt.Errorf("error retrieving possible shardKeyDefinition: %w", cmdResult.Err())
+	}
+	var collectionInfo bson.Raw
+	if err := cmdResult.Decode(&collectionInfo); err != nil {
+		return nil, fmt.Errorf("error decoding possible shardKeyDefinition: %w", err)
+	}
+	return extractShardKeyFields(collectionInfo)
+}
+
+var errShardedEmulatedDeletes = errors.New("emulated deletes (cosmos-deletes-cdc) cannot be combined with full-document-key on a sharded collection because delete updates carry only _id")
+
+func shardKeyCheckError(err error) error {
+	if errors.Is(err, errShardedEmulatedDeletes) {
+		return connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	return connect.NewError(connect.CodeInternal, err)
+}
+
+func streamShardKeyFields(ctx context.Context, client *mongo.Client, namespaces []iface.Namespace, settings ConnectorSettings) (map[iface.Namespace][]string, error) {
+	fieldsByNamespace := map[iface.Namespace][]string{}
+	if !settings.FullDocumentKey {
+		return fieldsByNamespace, nil
+	}
+	for _, ns := range namespaces {
+		fields, err := fetchShardKeyFields(ctx, client, iface.Location{Database: ns.Db, Collection: ns.Col})
+		if err != nil {
+			return nil, fmt.Errorf("failed to read the shard key of %s.%s: %w", ns.Db, ns.Col, err)
+		}
+		if settings.EmulateDeletes && len(fields) > 0 {
+			return nil, fmt.Errorf("%s.%s: %w", ns.Db, ns.Col, errShardedEmulatedDeletes)
+		}
+		fieldsByNamespace[ns] = fields
+	}
+	return fieldsByNamespace, nil
 }
 
 func extractShardKeyFields(collectionInfo bson.Raw) ([]string, error) {
@@ -210,45 +237,6 @@ func extractRidFromResumeToken(resumeToken bson.Raw) (string, error) {
 	}
 
 	return payload.Rid, nil
-}
-
-// create a find query for a task
-func createFindQuery(ctx context.Context, collection *mongo.Collection, task iface.ReadPlanTask) (cur *mongo.Cursor, err error) {
-	if task.Def.Low == nil && task.Def.High == nil { //no boundaries
-
-		return collection.Find(ctx, bson.D{})
-	} else if task.Def.Low == nil && task.Def.High != nil { //only upper boundary
-		if task.Def.PartitionKey == "" {
-			return nil, fmt.Errorf("Invalid task definition: %v", task)
-		}
-
-		return collection.Find(ctx, bson.D{
-			{task.Def.PartitionKey, bson.D{
-				{"$lt", task.Def.High},
-			}},
-		})
-	} else if task.Def.Low != nil && task.Def.High == nil { //only lower boundary
-		if task.Def.PartitionKey == "" {
-			return nil, fmt.Errorf("Invalid task definition: %v", task)
-		}
-
-		return collection.Find(ctx, bson.D{
-			{task.Def.PartitionKey, bson.D{
-				{"$gte", task.Def.Low},
-			}},
-		})
-	} else { //both boundaries
-		if task.Def.PartitionKey == "" {
-			return nil, fmt.Errorf("Invalid task definition: %v", task)
-		}
-
-		return collection.Find(ctx, bson.D{
-			{task.Def.PartitionKey, bson.D{
-				{"$gte", task.Def.Low},
-				{"$lt", task.Def.High},
-			}},
-		})
-	}
 }
 
 func nsToString(ns iface.Namespace) string {
