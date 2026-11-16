@@ -194,3 +194,16 @@ func TestLoadDocTableRejectsDeferrablePrimaryKeyNamingTheTable(t *testing.T) {
 		assert.Contains(t, err.Error(), f.schema+"."+table)
 	}
 }
+
+func TestLoadDocTableReturnsOneEntryPerColumnWhenAnotherTableReferencesTheKey(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, "CREATE TABLE %s.parent (id text PRIMARY KEY, doc jsonb, note text)", f.schema)
+	f.exec(ctx, t, "CREATE TABLE %s.child (id text PRIMARY KEY, doc jsonb, parent_id text REFERENCES %s.parent (id))", f.schema, f.schema)
+
+	got, err := loadDocTable(ctx, f.pool, f.schema+".parent")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id"}, got.PrimaryKey)
+	assert.Equal(t, []docColumn{{Name: "note", Type: "text"}}, got.Columns)
+}

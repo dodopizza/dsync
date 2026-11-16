@@ -873,6 +873,12 @@ func fromMongoID(id []*adiomv1.BsonValue) ([]interface{}, error) {
 // WriteUpdates implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.WriteUpdatesRequest]) (*connect.Response[adiomv1.WriteUpdatesResponse], error) {
 	namespace := r.Msg.GetNamespace()
+	if c.settings.DocumentMode {
+		if err := c.writeDocumentUpdates(ctx, namespace, r.Msg.GetUpdates()); err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil
+	}
 	pkeys := c.pkeys[namespace]
 	if len(pkeys) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("no primary key found for namespace %s", namespace))

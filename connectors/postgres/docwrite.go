@@ -37,6 +37,7 @@ type docPlan struct {
 	updatedAt string
 	field     string
 	query     string
+	delete    string
 }
 
 type docState struct {
@@ -91,6 +92,7 @@ func buildDocPlan(namespace string, table docTable, settings PostgresSettings) (
 	}
 	plan := &docPlan{table: table, columns: columns, updatedAt: updatedAt, field: field}
 	plan.query = docUpsertSQL(namespace, plan)
+	plan.delete = docDeleteSQL(namespace, plan.table.PrimaryKey)
 	return plan, nil
 }
 
@@ -237,6 +239,10 @@ func columnValue(doc bson.Raw, col docColumn) (any, error) {
 	if err != nil || rv.Type == bson.TypeNull {
 		return nil, nil
 	}
+	return typedValue(rv, col)
+}
+
+func typedValue(rv bson.RawValue, col docColumn) (any, error) {
 	value, err := scalarValue(rv)
 	if f, isDouble := value.(float64); isDouble && integerTypes[col.Type] {
 		if f != math.Trunc(f) || f < -(1<<63) || f >= 1<<63 {
@@ -278,9 +284,13 @@ func docBatchArgs(plan *docPlan, data [][]byte, now time.Time) ([][]any, error) 
 }
 
 func docWriteError(index int, err error) error {
+	return positionedWriteError("document", index, err)
+}
+
+func positionedWriteError(label string, index int, err error) error {
 	position := "write failed"
 	if index >= 0 {
-		position = fmt.Sprintf("document %d", index)
+		position = fmt.Sprintf("%s %d", label, index)
 	}
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		column := ""
