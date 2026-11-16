@@ -38,10 +38,7 @@ func canonicalKey(v bson.RawValue) string {
 func canonicalTuple(tuple []bson.RawValue) string {
 	var b strings.Builder
 	for _, v := range tuple {
-		k := canonicalKey(v)
-		b.WriteString(strconv.Itoa(len(k)))
-		b.WriteByte(':')
-		b.WriteString(k)
+		b.WriteString(canonicalKey(v))
 	}
 	return b.String()
 }

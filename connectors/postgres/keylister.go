@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/adiom-data/dsync/internal/util"
 	"github.com/adiom-data/dsync/protocol/iface"
@@ -18,6 +19,8 @@ import (
 type KeyLister struct {
 	pool     *pgxpool.Pool
 	mappings map[string]string
+	mu       sync.Mutex
+	owners   map[string]iface.Namespace
 }
 
 type keyRows interface {
@@ -53,6 +56,9 @@ func (l *KeyLister) Close() error {
 
 func (l *KeyLister) ScanKeys(ctx context.Context, ns iface.Namespace, keyFields []string, pageSize int, emit func([][]bson.RawValue) error) error {
 	table := l.Table(ns)
+	if err := l.claimTable(ns); err != nil {
+		return err
+	}
 	shape, err := loadDocTable(ctx, l.pool, table)
 	if err != nil {
 		return err
@@ -71,6 +77,20 @@ func (l *KeyLister) ScanKeys(ctx context.Context, ns iface.Namespace, keyFields 
 
 func (l *KeyLister) Table(ns iface.Namespace) string {
 	return keyTableName(l.mappings, ns)
+}
+
+func (l *KeyLister) claimTable(ns iface.Namespace) error {
+	table := l.Table(ns)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if owner, ok := l.owners[table]; ok && owner != ns {
+		return fmt.Errorf("namespaces %s.%s and %s.%s both resolve to table %s", owner.Db, owner.Col, ns.Db, ns.Col, table)
+	}
+	if l.owners == nil {
+		l.owners = map[string]iface.Namespace{}
+	}
+	l.owners[table] = ns
+	return nil
 }
 
 func keyTableName(mappings map[string]string, ns iface.Namespace) string {

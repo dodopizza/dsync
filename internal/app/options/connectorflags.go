@@ -106,11 +106,12 @@ func TeardownConnector(cc ConfiguredConnector) {
 }
 
 type AdditionalSettings struct {
-	BaseThreadCount int
-	Namespaces      []string
-	Reverse         bool
-	Destination     bool
-	witnessUsed     *bool
+	BaseThreadCount  int
+	Namespaces       []string
+	Reverse          bool
+	Destination      bool
+	IgnoreWitnessEnv bool
+	witnessUsed      *bool
 }
 
 type RegisteredConnector struct {
@@ -847,12 +848,26 @@ func cosmosSettingsFromFlags(f *connectorsv1.CosmosFlags, connString string, as 
 		s.EmulateDeletes = true
 		s.WitnessMongoConnString = f.CosmosDeletesCdc
 	}
-	if dsn := os.Getenv(cosmosWitnessPostgresEnv); dsn != "" && (!as.Destination || as.Reverse) {
+	if dsn := os.Getenv(cosmosWitnessPostgresEnv); dsn != "" && !as.IgnoreWitnessEnv && (!as.Destination || as.Reverse) {
 		if err := useCosmosPostgresWitness(&s, dsn, as); err != nil {
 			return s, err
 		}
 	}
 	return s, nil
+}
+
+func duplicateTarget(left, right []string) (string, bool) {
+	owners := map[string]string{}
+	for i, target := range right {
+		if !strings.Contains(left[i], ".") || !strings.Contains(target, ".") {
+			continue
+		}
+		if owner, ok := owners[target]; ok && owner != left[i] {
+			return target, true
+		}
+		owners[target] = left[i]
+	}
+	return "", false
 }
 
 func checkWitnessTransform(witnessUsed bool, restArgs []string) error {
@@ -870,6 +885,9 @@ func useCosmosPostgresWitness(s *cosmos.ConnectorSettings, dsn string, as Additi
 		return fmt.Errorf("%s cannot be used with --reverse: %w", cosmosWitnessPostgresEnv, ErrInvalidUsage)
 	}
 	left, right := util.NamespaceSplit(as.Namespaces, ":")
+	if target, ok := duplicateTarget(left, right); ok {
+		return fmt.Errorf("%s: namespaces share the target %s: %w", cosmosWitnessPostgresEnv, target, ErrInvalidUsage)
+	}
 	witness, err := postgres.NewKeyLister(context.Background(), dsn, util.Mapify(left, right))
 	if err != nil {
 		return fmt.Errorf("%s: %w", cosmosWitnessPostgresEnv, err)

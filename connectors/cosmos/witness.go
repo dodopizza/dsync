@@ -45,7 +45,8 @@ func keyTuple(doc bson.Raw, keyFields []string) ([]bson.RawValue, error) {
 	tuple = append(tuple, bson.RawValue{Type: id.Type, Value: slices.Clone(id.Value)})
 	for _, field := range keyFields {
 		value, err := doc.LookupErr(strings.Split(field, ".")...)
-		if errors.Is(err, bsoncore.ErrElementNotFound) {
+		var untraversable bsoncore.InvalidDepthTraversalError
+		if errors.Is(err, bsoncore.ErrElementNotFound) || errors.As(err, &untraversable) {
 			tuple = append(tuple, bson.RawValue{Type: bson.TypeNull})
 			continue
 		}

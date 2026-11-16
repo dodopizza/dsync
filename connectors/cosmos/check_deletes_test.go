@@ -736,9 +736,9 @@ func tupleDoc(id any, kv ...any) bson.D {
 	return doc
 }
 
-func TestCanonicalTupleDiffersWhenOnlyTheComponentBoundaryMoves(t *testing.T) {
+func TestCanonicalTupleComparesNumbersByValueAndStringsByBoundary(t *testing.T) {
 	require.NotEqual(t, canonicalTuple(mustValues("a", "bc")), canonicalTuple(mustValues("ab", "c")))
-	require.Equal(t, canonicalTuple(mustValues("a", "bc")), canonicalTuple(mustValues("a", "bc")))
+	require.NotEqual(t, canonicalTuple(mustValues(int32(1), int32(23))), canonicalTuple(mustValues(int32(12), int32(3))))
 	require.Equal(t, canonicalTuple(mustValues(int32(1), int32(5))), canonicalTuple(mustValues(int64(1), int64(5))))
 }
 

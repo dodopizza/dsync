@@ -122,6 +122,18 @@ func TestCosmosWitnessEnvIsIgnoredWhenCosmosIsTheDestination(t *testing.T) {
 	require.Nil(t, settings.Witness)
 }
 
+func TestCosmosWitnessEnvIsIgnoredWhenTheCallerOptsOut(t *testing.T) {
+	t.Setenv(witnessEnv, witnessDSN)
+	var used bool
+
+	settings, err := cosmosSettings(t, AdditionalSettings{IgnoreWitnessEnv: true, witnessUsed: &used})
+
+	require.NoError(t, err)
+	require.False(t, settings.EmulateDeletes)
+	require.Nil(t, settings.Witness)
+	require.False(t, used)
+}
+
 func TestCosmosWitnessWithATransformIsAUsageErrorNamingTheEnvVar(t *testing.T) {
 	err := checkWitnessTransform(true, []string{"transform-host:1234"})
 
@@ -163,4 +175,31 @@ func TestCosmosWitnessEnvWithReverseIsAUsageErrorEvenInTheDestinationPosition(t 
 
 	require.ErrorIs(t, err, ErrInvalidUsage)
 	require.ErrorContains(t, err, "--reverse")
+}
+
+func TestCosmosWitnessRefusesTwoNamespacesMappedToOneTable(t *testing.T) {
+	t.Setenv(witnessEnv, witnessDSN)
+
+	_, err := cosmosSettings(t, AdditionalSettings{Namespaces: []string{"t1.orders:public.orders", "t2.orders:public.orders"}})
+
+	require.ErrorIs(t, err, ErrInvalidUsage)
+	require.ErrorContains(t, err, witnessEnv)
+	require.ErrorContains(t, err, "public.orders")
+	require.NotContains(t, err.Error(), witnessSecret)
+}
+
+func TestCosmosWitnessAcceptsDistinctTargetsAndRepeatedIdenticalMappings(t *testing.T) {
+	t.Setenv(witnessEnv, witnessDSN)
+
+	_, err := cosmosSettings(t, AdditionalSettings{Namespaces: []string{"t1.orders:public.a", "t2.orders:public.b", "t1.orders:public.a"}})
+
+	require.NoError(t, err)
+}
+
+func TestCosmosWitnessAcceptsPrefixMappingsOntoOneSchema(t *testing.T) {
+	t.Setenv(witnessEnv, witnessDSN)
+
+	_, err := cosmosSettings(t, AdditionalSettings{Namespaces: []string{"db1:public", "db2:public"}})
+
+	require.NoError(t, err)
 }

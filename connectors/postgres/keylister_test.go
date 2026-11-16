@@ -313,3 +313,45 @@ func TestDeleteByListedTupleAddressesTheRowTheInsertWrote(t *testing.T) {
 		})
 	}
 }
+
+func TestClaimTableRefusesASecondNamespaceOnTheSameTable(t *testing.T) {
+	for name, test := range map[string]struct {
+		mappings map[string]string
+		first    iface.Namespace
+		second   iface.Namespace
+	}{
+		"explicit targets":       {map[string]string{"t1.orders": "public.orders", "t2.orders": "public.orders"}, iface.Namespace{Db: "t1", Col: "orders"}, iface.Namespace{Db: "t2", Col: "orders"}},
+		"prefix targets":         {map[string]string{"db1": "public", "db2": "public"}, iface.Namespace{Db: "db1", Col: "orders"}, iface.Namespace{Db: "db2", Col: "orders"}},
+		"identity versus mapped": {map[string]string{"x.y": "public.orders"}, iface.Namespace{Db: "public", Col: "orders"}, iface.Namespace{Db: "x", Col: "y"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lister := &KeyLister{mappings: test.mappings}
+			require.NoError(t, lister.claimTable(test.first))
+
+			err := lister.claimTable(test.second)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.first.Db+"."+test.first.Col)
+			assert.Contains(t, err.Error(), test.second.Db+"."+test.second.Col)
+			assert.Contains(t, err.Error(), lister.Table(test.first))
+		})
+	}
+}
+
+func TestClaimTableAllowsTheSameNamespaceOnEveryPass(t *testing.T) {
+	lister := &KeyLister{mappings: map[string]string{"db.col": "public.items"}}
+	ns := iface.Namespace{Db: "db", Col: "col"}
+
+	require.NoError(t, lister.claimTable(ns))
+	require.NoError(t, lister.claimTable(ns))
+	require.NoError(t, lister.claimTable(iface.Namespace{Db: "other", Col: "thing"}))
+}
+
+func TestScanKeysRefusesATableClaimedByAnotherNamespace(t *testing.T) {
+	lister := &KeyLister{mappings: map[string]string{"db1": "public", "db2": "public"}}
+	require.NoError(t, lister.claimTable(iface.Namespace{Db: "db1", Col: "orders"}))
+
+	err := lister.ScanKeys(t.Context(), iface.Namespace{Db: "db2", Col: "orders"}, nil, 10, func([][]bson.RawValue) error { return nil })
+
+	require.ErrorContains(t, err, "both resolve to table public.orders")
+}
