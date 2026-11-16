@@ -2,6 +2,7 @@ package pglib
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -142,6 +143,9 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 
 	pgConn, err := pgconn.Connect(ctx, c.ReplicationURL)
 	if err != nil {
+		if _, ok := errors.AsType[*pgconn.ParseConfigError](err); ok {
+			return errors.New("invalid replication connection string")
+		}
 		return err
 	}
 	defer pgConn.Close(ctx)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -157,6 +158,10 @@ func NewConn(ctx context.Context, settings PostgresSettings) (*conn, error) {
 	}
 	if settings.StreamFlushDelay == 0 {
 		settings.StreamFlushDelay = time.Minute * 3
+	}
+
+	if !validSlotName(settings.SlotName) {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid replication slot name"))
 	}
 
 	rUrl, err := createReplicationUrl(url)
@@ -975,9 +980,15 @@ func classifyStreamError(err error) error {
 	return toConnectError(err)
 }
 
+var slotNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+func validSlotName(name string) bool {
+	return slotNamePattern.MatchString(name)
+}
+
 func createReplicationUrl(urlString string) (string, error) {
 	parsed, err := url.Parse(urlString)
-	if err != nil {
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
 		return "", errors.New("invalid postgres connection string")
 	}
 	query := parsed.Query()

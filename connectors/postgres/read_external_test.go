@@ -159,7 +159,11 @@ func (r *replicationFixture) streamThroughServer(ctx context.Context, t *testing
 		}
 		defer stream.Close()
 		for stream.Receive() {
-			messages <- stream.Msg()
+			select {
+			case messages <- stream.Msg():
+			case <-sctx.Done():
+				return
+			}
 		}
 		result <- stream.Err()
 	}()

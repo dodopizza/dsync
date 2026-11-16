@@ -437,6 +437,9 @@ func GetRegisteredConnectors() []RegisteredConnector {
 			},
 			Create: func(args []string, as AdditionalSettings) (adiomv1connect.ConnectorServiceHandler, []string, error) {
 				return CreateHelper("Postgres", postgresUsage, connectorsv1.PostgresFlagsCommandFlags(), func(c *cli.Context, args []string, _ AdditionalSettings) (adiomv1connect.ConnectorServiceHandler, error) {
+					if err := RejectConnectionStringValues(c); err != nil {
+						return nil, err
+					}
 					flags, err := connectorsv1.ParsePostgresFlags(c)
 					if err != nil {
 						return nil, err

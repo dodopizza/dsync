@@ -57,6 +57,7 @@ func TestToConnectError(t *testing.T) {
 		"query canceled":                {pgErr("57014"), connect.CodeInternal},
 		"net timeout":                   {&net.OpError{Op: "read", Net: "tcp", Err: syscall.ETIMEDOUT}, connect.CodeUnavailable},
 		"unknown":                       {errors.New("boom"), connect.CodeInternal},
+		"connect code beats canceled":   {connect.NewError(connect.CodeUnavailable, fmt.Errorf("send: %w", context.Canceled)), connect.CodeUnavailable},
 		"existing connect code":         {connect.NewError(connect.CodeResourceExhausted, errors.New("too large")), connect.CodeResourceExhausted},
 		"wrapped connect code":          {fmt.Errorf("send: %w", connect.NewError(connect.CodeResourceExhausted, errors.New("too large"))), connect.CodeResourceExhausted},
 	}
