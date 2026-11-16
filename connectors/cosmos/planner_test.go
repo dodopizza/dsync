@@ -42,3 +42,12 @@ func TestSplitRangeObjectIdBoundariesStrictlyIncreasingWithinOneSecond(t *testin
 		require.Positive(t, bytes.Compare(bounds[i].Value, bounds[i-1].Value), "boundary %d must be strictly above the previous one", i)
 	}
 }
+
+func TestSplitRangeObjectIdWithEqualBoundsStaysASingleRange(t *testing.T) {
+	bound := objectIDValue(1000, 0)
+
+	boundaries, err := splitRange(bound, bound, 5)
+
+	require.NoError(t, err)
+	require.Equal(t, []bson.RawValue{bound, bound}, boundaries)
+}

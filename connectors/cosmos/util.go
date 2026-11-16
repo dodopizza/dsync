@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/adiom-data/dsync/protocol/iface"
 	"github.com/mitchellh/hashstructure"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -64,15 +65,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 	// we need ANY event to get the resume token that we can use to extract the cluster time
 	col := client.Database(location.Database).Collection(location.Collection)
 
-	cmdResult := client.Database(location.Database).RunCommand(ctx, bson.D{{"customAction", "GetCollection"}, {"collection", location.Collection}})
-	if cmdResult.Err() != nil {
-		return nil, fmt.Errorf("Error retrieving possible shardKeyDefinition %v", cmdResult.Err())
-	}
-	var collectionInfo bson.Raw
-	if err := cmdResult.Decode(&collectionInfo); err != nil {
-		return nil, fmt.Errorf("error decoding possible shardKeyDefinition: %w", err)
-	}
-	shardKeyFields, err := extractShardKeyFields(collectionInfo)
+	shardKeyFields, err := fetchShardKeyFields(ctx, client, location)
 	if err != nil {
 		return nil, err
 	}
@@ -134,6 +127,45 @@ func resumeTokenWithoutDummyRecord(ctx context.Context, changeStream *mongo.Chan
 		return token, nil
 	}
 	return nil, errors.Join(fmt.Errorf("not authorized to insert dummy record and the open change stream gave no resume token - is the namespace read-only?"), changeStream.Err())
+}
+
+func fetchShardKeyFields(ctx context.Context, client *mongo.Client, location iface.Location) ([]string, error) {
+	cmdResult := client.Database(location.Database).RunCommand(ctx, bson.D{{"customAction", "GetCollection"}, {"collection", location.Collection}})
+	if cmdResult.Err() != nil {
+		return nil, fmt.Errorf("error retrieving possible shardKeyDefinition: %w", cmdResult.Err())
+	}
+	var collectionInfo bson.Raw
+	if err := cmdResult.Decode(&collectionInfo); err != nil {
+		return nil, fmt.Errorf("error decoding possible shardKeyDefinition: %w", err)
+	}
+	return extractShardKeyFields(collectionInfo)
+}
+
+var errShardedEmulatedDeletes = errors.New("emulated deletes (cosmos-deletes-cdc) cannot be combined with full-document-key on a sharded collection because delete updates carry only _id")
+
+func shardKeyCheckError(err error) error {
+	if errors.Is(err, errShardedEmulatedDeletes) {
+		return connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	return connect.NewError(connect.CodeInternal, err)
+}
+
+func streamShardKeyFields(ctx context.Context, client *mongo.Client, namespaces []iface.Namespace, settings ConnectorSettings) (map[iface.Namespace][]string, error) {
+	fieldsByNamespace := map[iface.Namespace][]string{}
+	if !settings.FullDocumentKey {
+		return fieldsByNamespace, nil
+	}
+	for _, ns := range namespaces {
+		fields, err := fetchShardKeyFields(ctx, client, iface.Location{Database: ns.Db, Collection: ns.Col})
+		if err != nil {
+			return nil, fmt.Errorf("failed to read the shard key of %s.%s: %w", ns.Db, ns.Col, err)
+		}
+		if settings.EmulateDeletes && len(fields) > 0 {
+			return nil, fmt.Errorf("%s.%s: %w", ns.Db, ns.Col, errShardedEmulatedDeletes)
+		}
+		fieldsByNamespace[ns] = fields
+	}
+	return fieldsByNamespace, nil
 }
 
 func extractShardKeyFields(collectionInfo bson.Raw) ([]string, error) {

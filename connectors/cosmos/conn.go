@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -138,6 +139,9 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 
 	tokenMap := NewTokenMap()
 	if r.Msg.GetUpdates() {
+		if _, err := streamShardKeyFields(ctx, c.client, nsTasks, c.connectorSettings); err != nil {
+			return nil, shardKeyCheckError(err)
+		}
 		tokenMap, err = c.collectResumeTokens(ctx, nsTasks)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
@@ -331,12 +335,12 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 	return nil
 }
 
-func updateFromEvent(decode func(any) error) (*adiomv1.Update, error) {
+func updateFromEvent(decode func(any) error, shardKeyFields []string) (*adiomv1.Update, error) {
 	var change mongoconn.MongoUpdate
 	if err := decode(&change); err != nil {
 		return nil, fmt.Errorf("failed to decode change stream event: %w", err)
 	}
-	update, err := convertChangeStreamEventToUpdate(change)
+	update, err := convertChangeStreamEventToUpdate(change, shardKeyFields)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert change stream event: %w", err)
 	}
@@ -358,7 +362,7 @@ func deleteUpdate(id any) (*adiomv1.Update, error) {
 	}, nil
 }
 
-func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate) (*adiomv1.Update, error) {
+func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate, shardKeyFields []string) (*adiomv1.Update, error) {
 	//slog.Debug(fmt.Sprintf("Converting change stream event %v", change))
 
 	// get the id of the document that was changed
@@ -378,24 +382,24 @@ func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate) (*adiomv1.Up
 		return nil, fmt.Errorf("_id not found in documentKey")
 	}
 
+	id := []*adiomv1.BsonValue{{
+		Data: idVal,
+		Type: uint32(idType),
+		Name: "_id",
+	}}
+	shardKeyParts, err := shardKeyIdParts(change, shardKeyFields)
+	if err != nil {
+		return nil, err
+	}
+	id = append(id, shardKeyParts...)
+
 	if change.OperationType == "delete" {
-		return &adiomv1.Update{
-			Id: []*adiomv1.BsonValue{{
-				Data: idVal,
-				Type: uint32(idType),
-				Name: "_id",
-			}},
-			Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE,
-		}, nil
+		return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE}, nil
 	}
 
 	// get the full state of the document after the change
 	update := &adiomv1.Update{
-		Id: []*adiomv1.BsonValue{{
-			Data: idVal,
-			Type: uint32(idType),
-			Name: "_id",
-		}},
+		Id:   id,
 		Type: adiomv1.UpdateType_UPDATE_TYPE_UPDATE,
 		Data: change.FullDocument,
 	}
@@ -403,6 +407,40 @@ func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate) (*adiomv1.Up
 		update.Type = adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE
 	}
 	return update, nil
+}
+
+func shardKeyIdParts(change mongoconn.MongoUpdate, shardKeyFields []string) ([]*adiomv1.BsonValue, error) {
+	parts := make([]*adiomv1.BsonValue, 0, len(shardKeyFields))
+	for _, field := range shardKeyFields {
+		part, err := shardKeyIdPart(change, field)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
+	}
+	return parts, nil
+}
+
+func shardKeyIdPart(change mongoconn.MongoUpdate, field string) (*adiomv1.BsonValue, error) {
+	if len(change.FullDocument) > 0 {
+		if value, err := change.FullDocument.LookupErr(strings.Split(field, ".")...); err == nil {
+			return &adiomv1.BsonValue{Data: value.Value, Type: uint32(value.Type), Name: field}, nil
+		}
+	}
+	for _, k := range change.DocumentKey {
+		if k.Key != field {
+			continue
+		}
+		if k.Value == nil {
+			return &adiomv1.BsonValue{Type: uint32(bson.TypeNull), Name: field}, nil
+		}
+		valueType, data, err := bson.MarshalValue(k.Value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal shard key field %v: %w", field, err)
+		}
+		return &adiomv1.BsonValue{Data: data, Type: uint32(valueType), Name: field}, nil
+	}
+	return nil, fmt.Errorf("shard key field %v is in neither fullDocument nor documentKey", field)
 }
 
 func checkForDeletes(ctx context.Context, client *mongo.Client, witnessClient *mongo.Client, namespaces []iface.Namespace) (map[iface.Location][]*adiomv1.Update, error) {
@@ -466,10 +504,10 @@ type eventStream interface {
 	Err() error
 }
 
-func streamNamespaceEvents(ctx context.Context, stream eventStream, loc iface.Location, flush func([]*adiomv1.Update, bson.Raw) error) error {
+func streamNamespaceEvents(ctx context.Context, stream eventStream, loc iface.Location, shardKeyFields []string, flush func([]*adiomv1.Update, bson.Raw) error) error {
 	var updates []*adiomv1.Update
 	for stream.Next(ctx) {
-		update, err := updateFromEvent(stream.Decode)
+		update, err := updateFromEvent(stream.Decode, shardKeyFields)
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", loc.Database, loc.Collection, err)
 		}
@@ -512,6 +550,11 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 			return connect.NewError(connect.CodeInternal, fmt.Errorf("namespace should be fully qualified"))
 		}
 		namespaces = append(namespaces, ns)
+	}
+
+	shardKeyFields, err := streamShardKeyFields(ctx, c.client, namespaces, c.connectorSettings)
+	if err != nil {
+		return shardKeyCheckError(err)
 	}
 
 	var sendMutex sync.Mutex
@@ -600,7 +643,7 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 			}
 			defer changeStream.Close(streamCtx)
 
-			err = streamNamespaceEvents(streamCtx, changeStream, loc, func(updates []*adiomv1.Update, token bson.Raw) error {
+			err = streamNamespaceEvents(streamCtx, changeStream, loc, shardKeyFields[ns], func(updates []*adiomv1.Update, token bson.Raw) error {
 				tokenMap.AddToken(loc, token)
 				encodedToken, err := tokenMap.encodeMap()
 				if err != nil {

@@ -116,9 +116,9 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 						continue
 					}
 					slog.Debug(fmt.Sprintf("Min and max boundaries for task %v: %v, %v", nsTask, min, max))
-					// find approximate split points
+					// find split points
 					numParts := int(count / cc.settings.TargetDocCountPerPartition)
-					approxBounds, err := splitRange(min, max, numParts)
+					splitBounds, err := splitRange(min, max, numParts)
 					if err != nil {
 						slog.Warn(fmt.Sprintf("Failed to split range for task %v so not splitting: %v", nsTask, err))
 						task := cc.createReadPlanTaskForNs(nsTask)
@@ -126,28 +126,28 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 						finalTasksChannel <- task
 						continue
 					}
-					slog.Debug(fmt.Sprintf("Number of approximate split points for task %v: %v", nsTask, len(approxBounds)))
+					slog.Debug(fmt.Sprintf("Number of split points for task %v: %v", nsTask, len(splitBounds)))
 
 					//send min and max tasks to finalized channel
 					minTask := cc.createReadPlanTaskForNs(nsTask)
 					minTask.Def.PartitionKey = cc.settings.partitionKey
-					minTask.Def.High = min        //only setting the high boundary indicating that we want (-INF, min)
+					minTask.Def.High = min
 					minTask.EstimatedDocCount = 0 //we don't expect anything to be there
 
 					maxTask := cc.createReadPlanTaskForNs(nsTask)
 					maxTask.Def.PartitionKey = cc.settings.partitionKey
-					maxTask.Def.Low = max         //only setting the low boundary indicating that we want (max, INF)
+					maxTask.Def.Low = max
 					maxTask.EstimatedDocCount = 0 //we don't expect anything to be there
 
 					finalTasksChannel <- minTask
 					finalTasksChannel <- maxTask
 
 					//send the tasks between the split points
-					for i := 0; i < len(approxBounds)-1; i++ {
+					for i := 0; i < len(splitBounds)-1; i++ {
 						task := cc.createReadPlanTaskForNs(nsTask)
 						task.Def.PartitionKey = cc.settings.partitionKey
-						task.Def.Low = approxBounds[i]
-						task.Def.High = approxBounds[i+1]
+						task.Def.Low = splitBounds[i]
+						task.Def.High = splitBounds[i+1]
 						task.EstimatedDocCount = cc.settings.TargetDocCountPerPartition
 						finalTasksChannel <- task
 					}

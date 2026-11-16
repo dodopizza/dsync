@@ -92,7 +92,7 @@ func TestStreamNamespaceEventsStopsOnFailureAfterBufferedEvent(t *testing.T) {
 			stream := &fakeStream{events: []fakeEvent{goodEvent(1, "t1"), bad, goodEvent(0, "t3")}}
 			var out []flushed
 
-			err := streamNamespaceEvents(context.Background(), stream, testLoc, recordFlushes(&out))
+			err := streamNamespaceEvents(context.Background(), stream, testLoc, nil, recordFlushes(&out))
 
 			require.ErrorContains(t, err, "db1.col1")
 			require.Empty(t, out)
@@ -106,7 +106,7 @@ func TestStreamNamespaceEventsReturnsStreamError(t *testing.T) {
 	stream := &fakeStream{events: []fakeEvent{goodEvent(1, "t1")}, err: boom}
 	var out []flushed
 
-	err := streamNamespaceEvents(context.Background(), stream, testLoc, recordFlushes(&out))
+	err := streamNamespaceEvents(context.Background(), stream, testLoc, nil, recordFlushes(&out))
 
 	require.ErrorIs(t, err, boom)
 	require.ErrorContains(t, err, "db1.col1")
@@ -122,7 +122,7 @@ func TestStreamNamespaceEventsFlushesEventWithoutFullDocumentAtBatchEnd(t *testi
 	stream := &fakeStream{events: []fakeEvent{goodEvent(1, "t1"), noDoc}}
 	var out []flushed
 
-	err := streamNamespaceEvents(context.Background(), stream, testLoc, recordFlushes(&out))
+	err := streamNamespaceEvents(context.Background(), stream, testLoc, nil, recordFlushes(&out))
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -173,4 +173,23 @@ func TestDeleteUpdatesFromIDsReportsMarshalErrorAndDrainsProducer(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("producer blocked")
 	}
+}
+
+func TestStreamNamespaceEventsPassesShardKeyFieldsIntoEveryId(t *testing.T) {
+	doc := mustMarshalBSON(t, bson.D{{Key: "_id", Value: int32(1)}, {Key: "tenant", Value: "t1"}})
+	stream := &fakeStream{events: []fakeEvent{{
+		event: mongoconn.MongoUpdate{
+			OperationType: "update",
+			DocumentKey:   bson.D{{Key: "_id", Value: int32(1)}},
+			FullDocument:  doc,
+		},
+		token: bson.Raw("t1"),
+	}}}
+	var out []flushed
+
+	err := streamNamespaceEvents(context.Background(), stream, testLoc, []string{"tenant"}, recordFlushes(&out))
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, []string{"_id", "tenant"}, idNames(out[0].updates[0]))
 }

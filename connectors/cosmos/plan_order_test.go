@@ -89,6 +89,7 @@ func TestPartitionedTasksFormAnUnbrokenChainWithoutExtraLookups(t *testing.T) {
 	require.Len(t, byLow, len(tasks))
 	chain := []iface.ReadPlanTask{byLow[""]}
 	for high := boundBytes(chain[len(chain)-1].Def.High); high != ""; high = boundBytes(chain[len(chain)-1].Def.High) {
+		require.LessOrEqual(t, len(chain), len(tasks), "chain is longer than the task list")
 		next, ok := byLow[high]
 		require.True(t, ok, "no task starts where the previous one ends")
 		chain = append(chain, next)
@@ -97,4 +98,40 @@ func TestPartitionedTasksFormAnUnbrokenChainWithoutExtraLookups(t *testing.T) {
 	require.Equal(t, string(objectIDValue(1000, 1).Value), boundBytes(chain[0].Def.High))
 	require.Equal(t, string(objectIDValue(2000, 1).Value), boundBytes(chain[len(chain)-1].Def.Low))
 	require.Equal(t, []string{"count", "find", "find"}, *commands)
+}
+
+func planWithUpdates(t *testing.T, settings ConnectorSettings, updates bool, responses ...bson.D) (error, []string) {
+	t.Helper()
+	client, commands := recordingClient(t, responses...)
+	settings.MaxNumNamespaces = 1
+	settings.NumParallelPartitionWorkers = 1
+	settings.TargetDocCountPerPartition = 1000
+	connector := &conn{client: client, connectorSettings: settings}
+	_, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+		Namespaces: []string{"db.col"}, InitialSync: true, Updates: updates,
+	}))
+	return err, *commands
+}
+
+func TestGeneratePlanRejectsEmulatedDeletesWithFullDocumentKeyBeforeAnyOtherCommand(t *testing.T) {
+	err, commands := planWithUpdates(t, withFlags(true, true), true, shardedReply, countReply)
+
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	require.ErrorContains(t, err, "cosmos-deletes-cdc")
+	require.Equal(t, []string{"customAction"}, commands)
+}
+
+func TestGeneratePlanFailsWhenTheShardKeyCannotBeRead(t *testing.T) {
+	err, commands := planWithUpdates(t, withFlags(true, false), true, failedReply, countReply)
+
+	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+	require.ErrorContains(t, err, "no collection info")
+	require.Equal(t, []string{"customAction"}, commands)
+}
+
+func TestGeneratePlanWithoutUpdatesDoesNotReadTheShardKey(t *testing.T) {
+	err, commands := planWithUpdates(t, withFlags(true, true), false, countReply)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"count"}, commands)
 }

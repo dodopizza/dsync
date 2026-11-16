@@ -11,7 +11,7 @@ import (
 )
 
 func TestUpdateFromEventFailsOnDecodeError(t *testing.T) {
-	update, err := updateFromEvent(func(any) error { return errors.New("bad bson") })
+	update, err := updateFromEvent(func(any) error { return errors.New("bad bson") }, nil)
 
 	require.ErrorContains(t, err, "bad bson")
 	require.Nil(t, update)
@@ -21,7 +21,7 @@ func TestUpdateFromEventFailsOnMissingDocumentKey(t *testing.T) {
 	update, err := updateFromEvent(func(v any) error {
 		*(v.(*mongoconn.MongoUpdate)) = mongoconn.MongoUpdate{FullDocument: bson.Raw{}}
 		return nil
-	})
+	}, nil)
 
 	require.Error(t, err)
 	require.Nil(t, update)
@@ -31,7 +31,7 @@ func TestUpdateFromEventWithoutFullDocumentIsEmptyPartialUpdate(t *testing.T) {
 	update, err := updateFromEvent(func(v any) error {
 		*(v.(*mongoconn.MongoUpdate)) = mongoconn.MongoUpdate{DocumentKey: bson.D{{Key: "_id", Value: "a"}}}
 		return nil
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, update)
