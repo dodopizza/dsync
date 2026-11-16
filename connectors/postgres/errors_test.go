@@ -69,3 +69,24 @@ func TestToConnectError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsTransientError(t *testing.T) {
+	pgErr := func(code string) error { return &pgconn.PgError{Code: code} }
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"serialization failure": {pgErr("40001"), true},
+		"connection class":      {pgErr("08006"), true},
+		"too many connections":  {pgErr("53300"), true},
+		"unexpected eof":        {io.ErrUnexpectedEOF, true},
+		"deadline":              {context.DeadlineExceeded, true},
+		"unique violation":      {pgErr("23505"), false},
+		"missing relation":      {pgErr("42P01"), false},
+		"canceled":              {context.Canceled, false},
+		"plain":                 {errors.New("boom"), false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) { assert.Equal(t, tc.want, IsTransientError(tc.err)) })
+	}
+}
