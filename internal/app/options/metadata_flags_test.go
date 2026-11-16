@@ -67,7 +67,7 @@ func TestMetadataPostgresFlagDoesNotExist(t *testing.T) {
 	assert.Contains(t, err.Error(), "flag provided but not defined")
 }
 
-func TestMetadataPostgresEnvHiddenFromHelp(t *testing.T) {
+func TestMetadataPostgresHelpShowsVariableNameAndHidesValue(t *testing.T) {
 	t.Setenv("DSYNC_METADATA_POSTGRES", sentinelDSN)
 	flags, _ := GetFlagsAndBeforeFunc()
 	var buf bytes.Buffer

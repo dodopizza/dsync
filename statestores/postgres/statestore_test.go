@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/adiom-data/dsync/coordinators/simple"
 	"github.com/adiom-data/dsync/internal/util"
 	"github.com/adiom-data/dsync/protocol/iface"
 	"github.com/jackc/pgx/v5"
@@ -350,23 +351,29 @@ func TestReadPlanRoundTripKeepsEveryFieldAndType(t *testing.T) {
 		task.Def.Low, task.Def.High = bson.Binary{Data: low}, bson.Binary{Subtype: 0x80, Data: high}
 		return task
 	}
-	in := iface.ConnectorReadPlan{
-		Tasks:          []iface.ReadPlanTask{task(1, iface.ReadPlanTaskStatus_Completed, []byte{1, 2}, []byte{3}, 1<<40, 17), task(2, iface.ReadPlanTaskStatus_New, []byte{9}, nil, 5, 0)},
-		CdcResumeToken: []byte{7, 8, 9},
-		CreatedAtEpoch: 1700000000,
+	in := simple.FlowDetails{
+		FlowID:  "f1",
+		Options: iface.FlowOptions{Type: iface.UnidirectionalFlowType, SrcId: "src", DstId: "dst"},
+		ReadPlan: iface.ConnectorReadPlan{
+			Tasks:          []iface.ReadPlanTask{task(1, iface.ReadPlanTaskStatus_Completed, []byte{1, 2}, []byte{3}, 1<<40, 17), task(2, iface.ReadPlanTaskStatus_New, []byte{9}, []byte{}, 5, 0)},
+			CdcResumeToken: []byte{7, 8, 9},
+			CreatedAtEpoch: 1700000000,
+		},
 	}
 	var stored []byte
 	q := &fakeQuerier{row: func(int) fakeRow { return fakeRow{data: stored} }}
 	s := newStore(t, q)
-	require.NoError(t, s.PersistObject("flows", iface.FlowID("f1"), in))
+	require.NoError(t, s.PersistObject("flows", iface.FlowID("f1"), &in))
 	stored = q.calls[len(q.calls)-1].args[2].([]byte)
 
-	var out iface.ConnectorReadPlan
+	var out simple.FlowDetails
 	require.NoError(t, s.RetrieveObject("flows", iface.FlowID("f1"), &out))
 
-	require.Len(t, out.Tasks, 2)
-	for i, want := range in.Tasks {
-		got := out.Tasks[i]
+	assert.Equal(t, in.FlowID, out.FlowID)
+	assert.Equal(t, in.Options, out.Options)
+	require.Len(t, out.ReadPlan.Tasks, 2)
+	for i, want := range in.ReadPlan.Tasks {
+		got := out.ReadPlan.Tasks[i]
 		assert.Equal(t, want.Id, got.Id)
 		assert.Equal(t, want.Status, got.Status)
 		assert.Equal(t, want.EstimatedDocCount, got.EstimatedDocCount)
@@ -376,11 +383,11 @@ func TestReadPlanRoundTripKeepsEveryFieldAndType(t *testing.T) {
 		assert.Equal(t, want.Def.PartitionKey, got.Def.PartitionKey)
 		assert.IsType(t, bson.Binary{}, got.Def.Low)
 		assert.IsType(t, bson.Binary{}, got.Def.High)
+		assert.Equal(t, want.Def.Low, got.Def.Low)
+		assert.Equal(t, want.Def.High, got.Def.High)
 	}
-	assert.Equal(t, in.Tasks[0].Def.Low, out.Tasks[0].Def.Low)
-	assert.Equal(t, in.Tasks[0].Def.High, out.Tasks[0].Def.High)
-	assert.Equal(t, in.CdcResumeToken, out.CdcResumeToken)
-	assert.Equal(t, in.CreatedAtEpoch, out.CreatedAtEpoch)
+	assert.Equal(t, in.ReadPlan.CdcResumeToken, out.ReadPlan.CdcResumeToken)
+	assert.Equal(t, in.ReadPlan.CreatedAtEpoch, out.ReadPlan.CreatedAtEpoch)
 }
 
 func TestSetupFailureClosesThePoolAndTeardownClosesItOtherwise(t *testing.T) {
