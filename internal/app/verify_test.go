@@ -3,6 +3,7 @@ package dsync
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,12 @@ type listingSource struct {
 
 	skipInitialSync bool
 	skipStream      bool
+
+	listErr     error
+	streamBlock bool
+	streamErr   error
+	started     *atomic.Int32
+	returned    *atomic.Int32
 }
 
 func (h listingSource) GetInfo(context.Context, *connect.Request[adiomv1.GetInfoRequest]) (*connect.Response[adiomv1.GetInfoResponse], error) {
@@ -102,30 +109,34 @@ func (h listingSource) GeneratePlan(context.Context, *connect.Request[adiomv1.Ge
 }
 
 func (h listingSource) ListData(context.Context, *connect.Request[adiomv1.ListDataRequest]) (*connect.Response[adiomv1.ListDataResponse], error) {
+	if h.listErr != nil {
+		return nil, h.listErr
+	}
 	return connect.NewResponse(&adiomv1.ListDataResponse{Data: h.docs}), nil
 }
 
-func (h listingSource) StreamUpdates(_ context.Context, _ *connect.Request[adiomv1.StreamUpdatesRequest], s *connect.ServerStream[adiomv1.StreamUpdatesResponse]) error {
-	return s.Send(&adiomv1.StreamUpdatesResponse{Namespace: "db.col", Updates: h.updates})
+func (h listingSource) StreamUpdates(ctx context.Context, _ *connect.Request[adiomv1.StreamUpdatesRequest], s *connect.ServerStream[adiomv1.StreamUpdatesResponse]) error {
+	if h.started != nil {
+		h.started.Add(1)
+	}
+	if h.returned != nil {
+		defer h.returned.Add(1)
+	}
+	if err := s.Send(&adiomv1.StreamUpdatesResponse{Namespace: "db.col", Updates: h.updates}); err != nil {
+		return err
+	}
+	if h.streamBlock {
+		<-ctx.Done()
+	}
+	return h.streamErr
 }
 
-func processSource(t *testing.T, h listingSource, total, partition int) ([]Update, error) {
-	var got []Update
-	_, err := processSourceWith(t, h, total, partition, func(_ context.Context, u Update) error {
-		got = append(got, u)
-		return nil
-	})
-	return got, err
-}
-
-func processSourceWith(t *testing.T, h listingSource, total, partition int, process func(context.Context, Update) error) ([]Update, error) {
+func newTestSource(t *testing.T, h listingSource, total, partition int) *source {
 	_, handler := adiomv1connect.NewConnectorServiceHandler(h)
 	srv, err := memhttp.New(handler)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Close() })
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	s := &source{
+	return &source{
 		c:               adiomv1connect.NewConnectorServiceClient(srv.Client(), srv.URL()),
 		initialSyncDone: make(chan struct{}),
 		parallelism:     1,
@@ -134,7 +145,35 @@ func processSourceWith(t *testing.T, h listingSource, total, partition int, proc
 		skipInitialSync: h.skipInitialSync,
 		skipStream:      h.skipStream,
 	}
-	return nil, s.ProcessSource(ctx, process)
+}
+
+func runWithDeadline(t *testing.T, run func(context.Context) error) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not return in time")
+		return nil
+	}
+}
+
+func processSource(t *testing.T, h listingSource, total, partition int) ([]Update, error) {
+	var got []Update
+	err := processSourceWith(t, h, total, partition, func(_ context.Context, u Update) error {
+		got = append(got, u)
+		return nil
+	})
+	return got, err
+}
+
+func processSourceWith(t *testing.T, h listingSource, total, partition int, process func(context.Context, Update) error) error {
+	s := newTestSource(t, h, total, partition)
+	return runWithDeadline(t, func(ctx context.Context) error { return s.ProcessSource(ctx, process) })
 }
 
 func idPart(t *testing.T, name string, v any) *adiomv1.BsonValue {
@@ -218,7 +257,7 @@ func TestProcessSourceReturnsProcessErrorInsteadOfHanging(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h.skipInitialSync = name == "stream"
 			h.skipStream = name == "initial pass"
-			_, err := processSourceWith(t, h, 0, 0, func(context.Context, Update) error { return failing })
+			err := processSourceWith(t, h, 0, 0, func(context.Context, Update) error { return failing })
 
 			require.ErrorIs(t, err, failing)
 		})

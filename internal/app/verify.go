@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"log/slog"
+	"os"
+	"os/signal"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -65,6 +70,10 @@ var verifyCommand *cli.Command = &cli.Command{
 			Name:  "simple",
 			Usage: "Use a simple verifier that tails both sources",
 		},
+		&cli.BoolFlag{
+			Name:  "once",
+			Usage: "Compare once after the initial sync and exit with a non-zero status on mismatch (not with --simple)",
+		},
 		&cli.DurationFlag{
 			Name:  "latency",
 			Usage: "How stale entries are before being eligible to compare",
@@ -83,10 +92,11 @@ var verifyCommand *cli.Command = &cli.Command{
 }
 
 type Update struct {
-	Namespace   string
-	ID          []bson.RawValue
-	Data        []byte
-	InitialSync bool
+	Namespace       string
+	ID              []bson.RawValue
+	Data            []byte
+	InitialSync     bool
+	InitialSyncDone bool
 }
 
 type NamespacedID struct {
@@ -229,8 +239,13 @@ func (s *source) readPartitions(ctx context.Context, partitions []*adiomv1.Parti
 	return eg.Wait()
 }
 
-func (s *source) WaitForInitialSync() {
-	<-s.initialSyncDone
+func (s *source) WaitForInitialSync(ctx context.Context) bool {
+	select {
+	case <-s.initialSyncDone:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *source) ProcessSource(ctx context.Context, process func(context.Context, Update) error) error {
@@ -276,11 +291,12 @@ func (s *source) ProcessSource(ctx context.Context, process func(context.Context
 		defer close(ch)
 		if !s.skipInitialSync {
 			if err := s.readPartitions(egCtx, partitions, ch); err != nil {
-				close(s.initialSyncDone)
 				return err
 			}
 		}
-		close(s.initialSyncDone)
+		if err := send(egCtx, ch, Update{InitialSyncDone: true}); err != nil {
+			return err
+		}
 		if !s.skipStream {
 			if err := s.readUpdates(egCtx, updatePartitions, ch); err != nil {
 				return err
@@ -293,6 +309,10 @@ func (s *source) ProcessSource(ctx context.Context, process func(context.Context
 	eg.Go(func() error {
 		hasher := xxhash.New()
 		for update := range ch {
+			if update.InitialSyncDone {
+				close(s.initialSyncDone)
+				continue
+			}
 			if s.totalPartitions > 0 {
 				sum, err := hashKey(hasher, update.ID)
 				if err != nil {
@@ -344,9 +364,68 @@ type memVerify struct {
 	cooldown           time.Duration
 	latency            time.Duration
 	projection         map[string]interface{}
+	once               bool
+	poll               time.Duration
+	onReport           func(*report)
+	after              func(time.Duration) <-chan time.Time
+}
+
+const verifierPoll = time.Second
+
+var (
+	ErrVerifyMismatch = errors.New("verify found mismatches")
+	errInterrupted    = errors.New("interrupted before the first report")
+)
+
+func mismatchError(mismatches, total int64) error {
+	return fmt.Errorf("%w: %d mismatches in %d checked", ErrVerifyMismatch, mismatches, total)
+}
+
+func sourceError(parent context.Context, err error) error {
+	if err != nil && parent.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+type report struct {
+	mismatches int64
+	total      int64
+}
+
+func (r *report) verdict() error {
+	if r == nil {
+		return errInterrupted
+	}
+	if r.mismatches > 0 {
+		return mismatchError(r.mismatches, r.total)
+	}
+	return nil
+}
+
+func checkVerifyFlags(once, simple bool, latency time.Duration) error {
+	if once && simple {
+		return fmt.Errorf("--once cannot be combined with --simple")
+	}
+	if !simple && latency <= 0 {
+		return fmt.Errorf("--latency must be positive")
+	}
+	return nil
 }
 
 func (m *memVerify) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	poll := m.poll
+	if poll <= 0 {
+		poll = verifierPoll
+	}
+	after := m.after
+	if after == nil {
+		after = time.After
+	}
+	var stopped atomic.Bool
+	var last *report
 	verifiers := map[string]ds.Verifier{}
 	var mut sync.RWMutex
 	getVerifier := func(ns string) ds.Verifier {
@@ -357,7 +436,7 @@ func (m *memVerify) Run(ctx context.Context) error {
 			mut.Lock()
 			v, ok := verifiers[ns]
 			if !ok {
-				v = ds.NewVerifier(ctx, clock.New(), m.latency, time.Second, 0)
+				v = ds.NewVerifier(runCtx, clock.New(), m.latency, poll, 0)
 				verifiers[ns] = v
 			}
 			mut.Unlock()
@@ -366,36 +445,67 @@ func (m *memVerify) Run(ctx context.Context) error {
 		mut.RUnlock()
 		return v
 	}
+	takeReport := func() *report {
+		r := &report{}
+		mut.RLock()
+		for ns, verifier := range verifiers {
+			mismatches, total := verifier.MismatchCountAndTotal()
+			if mismatches > 0 {
+				slog.Info("Verifying", "namespace", ns, "mismatches", mismatches, "count", total, "ids", verifier.Find(m.limit))
+			}
+			r.mismatches += mismatches
+			r.total += total
+		}
+		mut.RUnlock()
+		slog.Info("Verifying", "ok", r.mismatches == 0, "mismatches", r.mismatches, "count", r.total)
+		last = r
+		if m.onReport != nil {
+			m.onReport(r)
+		}
+		return r
+	}
 
-	eg, egCtx := errgroup.WithContext(ctx)
+	srcErr := func(err error) error {
+		if stopped.Load() {
+			return nil
+		}
+		return sourceError(ctx, err)
+	}
+
+	eg, egCtx := errgroup.WithContext(runCtx)
 	eg.Go(func() error {
-		return m.leftSource.ProcessSource(egCtx, processMemVerify(getVerifier, true, m.leftNamespacesMap, m.projection))
+		return srcErr(m.leftSource.ProcessSource(egCtx, processMemVerify(getVerifier, true, m.leftNamespacesMap, m.projection)))
 	})
 	eg.Go(func() error {
-		return m.rightSource.ProcessSource(egCtx, processMemVerify(getVerifier, false, m.rightNamespacesMap, m.projection))
+		return srcErr(m.rightSource.ProcessSource(egCtx, processMemVerify(getVerifier, false, m.rightNamespacesMap, m.projection)))
 	})
 	eg.Go(func() error {
-		ticker := time.NewTicker(time.Second)
+		if !m.leftSource.WaitForInitialSync(egCtx) || !m.rightSource.WaitForInitialSync(egCtx) {
+			return nil
+		}
+		if m.once {
+			select {
+			case <-after(m.latency + poll):
+			case <-egCtx.Done():
+				return nil
+			}
+			if egCtx.Err() != nil {
+				return nil
+			}
+			takeReport()
+			stopped.Store(true)
+			cancel()
+			return nil
+		}
+		ticker := time.NewTicker(poll)
 		defer ticker.Stop()
-		m.leftSource.WaitForInitialSync()
-		m.rightSource.WaitForInitialSync()
 		for {
 			select {
 			case <-ticker.C:
-				found := false
-				var totalMismatches, totalCount int64
-				mut.RLock()
-				for ns, verifier := range verifiers {
-					mismatches, total := verifier.MismatchCountAndTotal()
-					if mismatches > 0 {
-						found = true
-						slog.Info("Verifying", "namespace", ns, "mismatches", mismatches, "count", total, "ids", verifier.Find(m.limit))
-					}
-					totalMismatches += mismatches
-					totalCount += total
+				if egCtx.Err() != nil {
+					return nil
 				}
-				mut.RUnlock()
-				slog.Info("Verifying", "ok", !found, "mismatches", totalMismatches, "count", totalCount)
+				takeReport()
 				ticker.Reset(m.cooldown)
 			case <-egCtx.Done():
 				return nil
@@ -403,7 +513,10 @@ func (m *memVerify) Run(ctx context.Context) error {
 		}
 	})
 
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+	return last.verdict()
 }
 
 type tailVerify struct {
@@ -415,6 +528,8 @@ type tailVerify struct {
 	cooldown           time.Duration
 	latency            time.Duration
 	projection         map[string]interface{}
+	poll               time.Duration
+	onReport           func(*report)
 }
 
 type SimpleTailDiffer struct {
@@ -521,25 +636,33 @@ type tailDiff struct {
 }
 
 func (v *tailVerify) Run(ctx context.Context) error {
+	poll := v.poll
+	if poll <= 0 {
+		poll = verifierPoll
+	}
+	var last *report
 	std := &SimpleTailDiffer{m: map[uint64]tailDiff{}}
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
 		v.leftSource.skipInitialSync = true
-		return v.leftSource.ProcessSource(egCtx, processTail(std, v.leftNamespacesMap, v.projection, true))
+		return sourceError(ctx, v.leftSource.ProcessSource(egCtx, processTail(std, v.leftNamespacesMap, v.projection, true)))
 	})
 	eg.Go(func() error {
 		v.rightSource.skipInitialSync = true
-		return v.rightSource.ProcessSource(egCtx, processTail(std, v.rightNamespacesMap, v.projection, false))
+		return sourceError(ctx, v.rightSource.ProcessSource(egCtx, processTail(std, v.rightNamespacesMap, v.projection, false)))
 	})
 	eg.Go(func() error {
 		cumulativeTotal := 0
 		cumulativeDiff := 0
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(poll)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
+				if egCtx.Err() != nil {
+					return nil
+				}
 				diffs := 0
 				items := std.GetAndClean(time.Now().Add(-v.latency))
 				for _, item := range items {
@@ -553,6 +676,10 @@ func (v *tailVerify) Run(ctx context.Context) error {
 				}
 				cumulativeTotal += len(items)
 				slog.Info("Total diffs", "diffs", diffs, "total_checked", len(items), "cumulative_diffs", cumulativeDiff, "cumulative_total", cumulativeTotal)
+				last = &report{mismatches: int64(cumulativeDiff), total: int64(cumulativeTotal)}
+				if v.onReport != nil {
+					v.onReport(last)
+				}
 				ticker.Reset(v.cooldown)
 			case <-egCtx.Done():
 				return nil
@@ -560,7 +687,10 @@ func (v *tailVerify) Run(ctx context.Context) error {
 		}
 	})
 
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+	return last.verdict()
 }
 
 func runVerify(c *cli.Context) error {
@@ -575,6 +705,10 @@ func runVerify(c *cli.Context) error {
 	}
 	if partition >= totalPartitions || partition < 0 {
 		return fmt.Errorf("invalid partition")
+	}
+	once := c.Bool("once")
+	if err := checkVerifyFlags(once, c.Bool("simple"), c.Duration("latency")); err != nil {
+		return err
 	}
 	logger.Setup(logger.Options{Verbosity: c.String("verbosity")})
 	namespaces := c.StringSlice("namespaces")
@@ -595,7 +729,12 @@ func runVerify(c *cli.Context) error {
 	leftNamespacesMap := util.Mapify(leftNamespaces, namespaces)
 	rightNamespacesMap := util.Mapify(rightNamespaces, namespaces)
 
-	ctx := c.Context
+	ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	left, right, _, err := options.ConfigureConnectors(c.Args().Slice(), options.AdditionalSettings{})
 	if err != nil {
 		return err
@@ -655,6 +794,7 @@ func runVerify(c *cli.Context) error {
 		cooldown:           cooldown,
 		latency:            latency,
 		projection:         projectionMap,
+		once:               once,
 	}
 
 	if err := mv.Run(ctx); err != nil {
