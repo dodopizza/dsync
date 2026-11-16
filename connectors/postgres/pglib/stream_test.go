@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
@@ -68,4 +69,28 @@ func TestUnchangedToastColumns(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("columns = %#v, want %#v", got, want)
 	}
+}
+
+func TestHandleLogicalTruncateFailsBeforeBatch(t *testing.T) {
+	state := &replState{
+		currentLSN: 42,
+		relations: map[uint32]*pglogrepl.RelationMessageV2{
+			7: {RelationMessage: pglogrepl.RelationMessage{RelationID: 7, Namespace: "public", RelationName: "orders"}},
+		},
+		updates: []Update{{Namespace: "public", TableName: "orders", Type: UpdateTypeInsert}},
+	}
+	fh := &flushHelper{}
+	ch := make(chan UpdateBatch, 1)
+
+	err := handleLogical(t.Context(), state, fh, ch, &pglogrepl.TruncateMessageV2{
+		TruncateMessage: pglogrepl.TruncateMessage{RelationNum: 2, RelationIDs: []uint32{7, 9}},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public.orders")
+	assert.Contains(t, err.Error(), "9")
+	assert.Contains(t, err.Error(), "TRUNCATE")
+	assert.Contains(t, err.Error(), "not supported")
+	assert.Empty(t, ch)
+	assert.Empty(t, fh.items)
 }
