@@ -64,6 +64,8 @@ Run locally in containers so far: connection error texts, state store with wrong
 * pgx keeps the password inside `ConnectError.Config`; formatting that error with `%+v` would print it. Nothing here does [#20].
 * A mistyped URL (missing `:` or `@`) can place secret text in the host field [#20].
 * The state store has its own fixed-text sanitizer, separate from the connector's; the SQL batch connector has none [#28].
+* Caller context around a server error is printed as is; it is safe for the wrap sites that exist today. A new wrapper that puts sensitive text around a server error would print it [#28].
+* `HideConnDetails` also hides server errors now; the name no longer says so [#28].
 * The unit tests of connection errors assume that port 1 on localhost refuses connections [#28].
 * The `password=` guard covers global flags and the PostgreSQL connector's flags only, and refuses a harmless value containing `password=` [#22].
 * On a failed batch the core writer logs the first message, id bytes included [#22].
