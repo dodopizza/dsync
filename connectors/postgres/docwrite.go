@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/adiom-data/dsync/connectors/postgres/pglib"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -297,17 +298,10 @@ func positionedWriteError(label string, index int, err error) error {
 		position += ": setting session_replication_role"
 	}
 	if answered {
-		detail := ""
-		if pgErr.ColumnName != "" {
-			detail += ": column " + pgErr.ColumnName
-		}
-		if pgErr.ConstraintName != "" {
-			detail += ": constraint " + pgErr.ConstraintName
-		}
-		return connect.NewError(sqlStateCode(pgErr.Code), fmt.Errorf("%s%s: SQLSTATE %s", position, detail, pgErr.Code))
+		return connect.NewError(sqlStateCode(pgErr.Code), fmt.Errorf("%s%s: SQLSTATE %s", position, pglib.ServerErrorNames(pgErr), pgErr.Code))
 	}
 	if code := connectCode(err); code != connect.CodeInternal {
-		return connect.NewError(code, err)
+		return connect.NewError(code, pglib.HideConnDetails(err))
 	}
 	return connect.NewError(connect.CodeInternal, fmt.Errorf("%s: client error", position))
 }

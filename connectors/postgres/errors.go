@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/adiom-data/dsync/connectors/postgres/pglib"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -30,7 +31,7 @@ func toConnectError(err error) error {
 	if _, ok := errors.AsType[*connect.Error](err); ok {
 		return err
 	}
-	return connect.NewError(connectCode(err), err)
+	return connect.NewError(connectCode(err), pglib.HideConnDetails(err))
 }
 
 func connectCode(err error) connect.Code {
@@ -69,10 +70,14 @@ func sqlStateCode(sqlState string) connect.Code {
 }
 
 func classifyStreamError(err error) error {
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlStateObjectInUse {
-		return connect.NewError(connect.CodeUnavailable, err)
+	if _, ok := errors.AsType[*connect.Error](err); ok {
+		return err
 	}
-	return toConnectError(err)
+	code := connectCode(err)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlStateObjectInUse {
+		code = connect.CodeUnavailable
+	}
+	return connect.NewError(code, pglib.HideConnDetails(err))
 }
 
 func IsTransientError(err error) bool {

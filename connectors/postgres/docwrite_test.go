@@ -288,7 +288,7 @@ func TestPositionedWriteErrorKeepsPositionColumnAndSQLStateButNeverTheServerMess
 	assert.NotContains(t, err.Error(), marker)
 
 	unique := positionedWriteError("document", 2, &pgconn.PgError{Code: "23505", Message: marker, Detail: "Key (n)=(" + marker + ") already exists.", ConstraintName: "numbers_n_key", TableName: "numbers"})
-	assert.Equal(t, "internal: document 2: constraint numbers_n_key: SQLSTATE 23505", unique.Error())
+	assert.Equal(t, "internal: document 2: table numbers: constraint numbers_n_key: SQLSTATE 23505", unique.Error())
 
 	serialization := positionedWriteError("document", 0, &pgconn.PgError{Code: "40001", Message: marker})
 	assert.Equal(t, connect.CodeAborted, connect.CodeOf(serialization))

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/adiom-data/dsync/connectors/postgres/pglib"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -74,13 +75,13 @@ func (c *conn) DropReplication(ctx context.Context) error {
 				return err
 			})
 			if err != nil {
-				errs = append(errs, fmt.Errorf("drop replication slot %q: %w", c.settings.SlotName, err))
+				errs = append(errs, fmt.Errorf("drop replication slot %q: %w", c.settings.SlotName, pglib.HideConnDetails(err)))
 			}
 		}
 		if publication {
 			query := fmt.Sprintf("DROP PUBLICATION IF EXISTS %v", pgx.Identifier([]string{c.settings.PublicationName}).Sanitize())
 			if _, err := c.c.Exec(ctx, query); err != nil {
-				errs = append(errs, fmt.Errorf("drop publication %q: %w", c.settings.PublicationName, err))
+				errs = append(errs, fmt.Errorf("drop publication %q: %w", c.settings.PublicationName, pglib.HideConnDetails(err)))
 			}
 		}
 		return errors.Join(errs...)
