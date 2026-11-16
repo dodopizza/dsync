@@ -112,7 +112,7 @@ func TestToConnectErrorHidesConnectionDetails(t *testing.T) {
 	_, isConnectError := errors.AsType[*pgconn.ConnectError](dialErr)
 	require.True(t, isConnectError)
 
-	got := toConnectError(fmt.Errorf("%w: %w", errSetReplicaRole, dialErr))
+	got := setReplicaRoleError(dialErr)
 
 	requireNoConnectionDetails(t, got)
 	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(got))
@@ -172,4 +172,41 @@ func TestDropReplicationHidesConnectionDetails(t *testing.T) {
 
 	require.Error(t, err)
 	requireNoConnectionDetails(t, err)
+}
+
+func TestToConnectErrorHidesServerMessage(t *testing.T) {
+	original := &pgconn.PgError{Code: "42501", Message: `permission denied for database "markerdb"`}
+
+	got := toConnectError(fmt.Errorf("query: %w", original))
+
+	assert.Equal(t, connectCode(original), connect.CodeOf(got))
+	assert.EqualError(t, got, "internal: query: postgres server error: SQLSTATE 42501")
+	assert.NotContains(t, got.Error(), "markerdb")
+	assert.ErrorIs(t, got, original)
+}
+
+func TestClassifyStreamErrorHidesSlotInUseMessage(t *testing.T) {
+	got := classifyStreamError(&pgconn.PgError{Code: "55006", Message: "slot marker active"})
+
+	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(got))
+	assert.NotContains(t, got.Error(), "marker")
+	assert.Contains(t, got.Error(), "SQLSTATE 55006")
+}
+
+func TestSetReplicaRoleErrorKeepsHintAndHidesServerMessage(t *testing.T) {
+	original := &pgconn.PgError{Code: "42501", Message: "permission marker"}
+
+	got := setReplicaRoleError(original)
+
+	assert.EqualError(t, got, "internal: failed to set session_replication_role: postgres server error: SQLSTATE 42501")
+	assert.ErrorIs(t, got, errSetReplicaRole)
+	assert.ErrorIs(t, got, original)
+}
+
+func TestToConnectErrorKeepsCallerContextOfServerError(t *testing.T) {
+	original := &pgconn.PgError{Severity: "ERROR", Code: "42501", Message: "permission marker"}
+
+	got := toConnectError(fmt.Errorf("witness scan of db.col: %w", original))
+
+	assert.EqualError(t, got, "internal: witness scan of db.col: postgres server error: SQLSTATE 42501")
 }

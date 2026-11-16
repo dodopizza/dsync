@@ -298,14 +298,7 @@ func positionedWriteError(label string, index int, err error) error {
 		position += ": setting session_replication_role"
 	}
 	if answered {
-		detail := ""
-		if pgErr.ColumnName != "" {
-			detail += ": column " + pgErr.ColumnName
-		}
-		if pgErr.ConstraintName != "" {
-			detail += ": constraint " + pgErr.ConstraintName
-		}
-		return connect.NewError(sqlStateCode(pgErr.Code), fmt.Errorf("%s%s: SQLSTATE %s", position, detail, pgErr.Code))
+		return connect.NewError(sqlStateCode(pgErr.Code), fmt.Errorf("%s%s: SQLSTATE %s", position, pglib.ServerErrorNames(pgErr), pgErr.Code))
 	}
 	if code := connectCode(err); code != connect.CodeInternal {
 		return connect.NewError(code, pglib.HideConnDetails(err))

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"strings"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -26,11 +27,30 @@ func HideConnDetails(err error) error {
 	if _, hidden := err.(*hiddenConnError); hidden {
 		return err
 	}
-	text, ok := connErrorText(err)
+	text, ok := hiddenText(err)
 	if !ok {
 		return err
 	}
-	return &hiddenConnError{text: text + failureSuffix(err), err: err}
+	return &hiddenConnError{text: text, err: err}
+}
+
+func hiddenText(err error) (string, bool) {
+	if text, ok := connErrorText(err); ok {
+		return text + failureSuffix(err), true
+	}
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
+		return serverErrorText(err, pgErr), true
+	}
+	return "", false
+}
+
+func serverErrorText(err error, pgErr *pgconn.PgError) string {
+	safe := "postgres server error" + ServerErrorNames(pgErr) + ": SQLSTATE " + pgErr.Code
+	text := strings.ReplaceAll(err.Error(), pgErr.Error(), safe)
+	if text == err.Error() || strings.Contains(text, "(SQLSTATE ") {
+		return safe
+	}
+	return text
 }
 
 func connErrorText(err error) (string, bool) {
@@ -46,6 +66,24 @@ func connErrorText(err error) (string, bool) {
 		return "postgres network error", true
 	}
 	return "", false
+}
+
+func ServerErrorNames(pgErr *pgconn.PgError) string {
+	names := ""
+	if pgErr.TableName != "" {
+		table := pgErr.TableName
+		if pgErr.SchemaName != "" {
+			table = pgErr.SchemaName + "." + table
+		}
+		names += ": table " + table
+	}
+	if pgErr.ColumnName != "" {
+		names += ": column " + pgErr.ColumnName
+	}
+	if pgErr.ConstraintName != "" {
+		names += ": constraint " + pgErr.ConstraintName
+	}
+	return names
 }
 
 func failureSuffix(err error) string {
