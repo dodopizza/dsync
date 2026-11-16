@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,7 +138,7 @@ func (r *replicationFixture) waitWalSender(ctx context.Context, t *testing.T) in
 	}
 }
 
-func (r *replicationFixture) streamThroughServer(ctx context.Context, t *testing.T) <-chan error {
+func (r *replicationFixture) streamThroughServer(ctx context.Context, t *testing.T) (<-chan error, <-chan *adiomv1.StreamUpdatesResponse) {
 	mux := http.NewServeMux()
 	mux.Handle(adiomv1connect.NewConnectorServiceHandler(r.conn))
 	server := httptest.NewServer(mux)
@@ -147,6 +148,7 @@ func (r *replicationFixture) streamThroughServer(ctx context.Context, t *testing
 
 	sctx, cancel := context.WithCancel(ctx)
 	result := make(chan error, 1)
+	messages := make(chan *adiomv1.StreamUpdatesResponse, 16)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -157,6 +159,7 @@ func (r *replicationFixture) streamThroughServer(ctx context.Context, t *testing
 		}
 		defer stream.Close()
 		for stream.Receive() {
+			messages <- stream.Msg()
 		}
 		result <- stream.Err()
 	}()
@@ -168,7 +171,7 @@ func (r *replicationFixture) streamThroughServer(ctx context.Context, t *testing
 			t.Error("stream goroutine did not stop")
 		}
 	})
-	return result
+	return result, messages
 }
 
 func awaitStreamError(ctx context.Context, t *testing.T, result <-chan error) error {
@@ -185,7 +188,7 @@ func awaitStreamError(ctx context.Context, t *testing.T, result <-chan error) er
 func TestStreamUpdatesTerminatedWalSenderIsUnavailable(t *testing.T) {
 	ctx := testContext(t)
 	r := newReplicationFixture(ctx, t)
-	result := r.streamThroughServer(ctx, t)
+	result, _ := r.streamThroughServer(ctx, t)
 
 	pid := r.waitWalSender(ctx, t)
 	_, err := r.admin.Exec(ctx, "SELECT pg_terminate_backend($1)", pid)
@@ -220,4 +223,51 @@ func TestStartReplicationOnActiveSlotIsUnavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, "55006", sqlState(t, err))
 	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(classifyStreamError(err)))
+}
+
+func TestStreamUpdatesUnencodableKeyIsInternal(t *testing.T) {
+	ctx := testContext(t)
+	r := newReplicationFixture(ctx, t)
+	table := strings.Split(r.namespace, ".")[0] + ".composite"
+	_, err := r.admin.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (id integer, at timestamptz, PRIMARY KEY (id, at))", table))
+	must(t, err, "create table")
+	_, err = r.admin.Exec(ctx, fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", r.publication, table))
+	must(t, err, "add table")
+	r.conn.pkeys[table] = []string{"id", "at"}
+	result, _ := r.streamThroughServer(ctx, t)
+
+	r.waitWalSender(ctx, t)
+	_, err = r.admin.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1, now())", table))
+	must(t, err, "insert")
+
+	streamErr := awaitStreamError(ctx, t, result)
+	assert.Equal(t, connect.CodeInternal, connect.CodeOf(streamErr))
+	assert.Contains(t, streamErr.Error(), "gob")
+}
+
+func TestStreamUpdatesSkipsTransactionsWithoutChanges(t *testing.T) {
+	ctx := testContext(t)
+	r := newReplicationFixture(ctx, t)
+	result, messages := r.streamThroughServer(ctx, t)
+
+	r.waitWalSender(ctx, t)
+	_, err := r.admin.Exec(ctx, "SELECT pg_logical_emit_message(true, 'p', 'x')")
+	must(t, err, "emit message")
+	_, err = r.admin.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, v) VALUES (1, 'a')", r.table))
+	must(t, err, "insert")
+
+	select {
+	case msg := <-messages:
+		require.Len(t, msg.GetUpdates(), 1)
+		assert.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_INSERT, msg.GetUpdates()[0].GetType())
+	case err := <-result:
+		t.Fatalf("stream ended (%v)", connect.CodeOf(err))
+	case <-ctx.Done():
+		t.Fatal("insert never arrived")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("stream ended (%v)", connect.CodeOf(err))
+	default:
+	}
 }

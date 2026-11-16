@@ -57,6 +57,8 @@ func TestToConnectError(t *testing.T) {
 		"query canceled":                {pgErr("57014"), connect.CodeInternal},
 		"net timeout":                   {&net.OpError{Op: "read", Net: "tcp", Err: syscall.ETIMEDOUT}, connect.CodeUnavailable},
 		"unknown":                       {errors.New("boom"), connect.CodeInternal},
+		"existing connect code":         {connect.NewError(connect.CodeResourceExhausted, errors.New("too large")), connect.CodeResourceExhausted},
+		"wrapped connect code":          {fmt.Errorf("send: %w", connect.NewError(connect.CodeResourceExhausted, errors.New("too large"))), connect.CodeResourceExhausted},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -23,9 +23,13 @@ const (
 	sqlStateOutOfMemory                     = "53200"
 	sqlStateIdleSessionTimeout              = "57P05"
 	sqlStateIdleInTransactionSessionTimeout = "25P03"
+	sqlStateObjectInUse                     = "55006"
 )
 
 func toConnectError(err error) error {
+	if _, ok := errors.AsType[*connect.Error](err); ok {
+		return err
+	}
 	return connect.NewError(connectCode(err), err)
 }
 

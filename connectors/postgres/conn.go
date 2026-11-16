@@ -554,12 +554,6 @@ func (c *conn) toBsonAdiomUpdate(update pglib.Update) (*adiomv1.Update, error) {
 
 // StreamUpdates implements adiomv1connect.ConnectorServiceHandler.
 func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.StreamUpdatesRequest], res *connect.ServerStream[adiomv1.StreamUpdatesResponse]) error {
-	pgConn, err := pgconn.Connect(ctx, c.replicationUrl)
-	if err != nil {
-		return toConnectError(err)
-	}
-	defer pgConn.Close(ctx)
-
 	rawCursor := req.Msg.GetCursor()
 	cursor, err := DecodeStreamCursor(rawCursor)
 	if err != nil {
@@ -600,14 +594,14 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 			cursor.LSN = max(cursor.LSN, lastSafeLSN)
 			nextCursor, err := cursor.Encode()
 			if err != nil {
-				return err
+				return connect.NewError(connect.CodeInternal, err)
 			}
 			if err := res.Send(&adiomv1.StreamUpdatesResponse{
 				Updates:    batch,
 				Namespace:  ns,
 				NextCursor: nextCursor,
 			}); err != nil {
-				return err
+				return toConnectError(err)
 			}
 			batch = nil
 			deadline = time.Now().Add(maxBatchWait)
@@ -625,7 +619,7 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 				for _, update := range updates {
 					up, err := c.toBsonAdiomUpdate(update)
 					if err != nil {
-						return err
+						return connect.NewError(connect.CodeInternal, err)
 					}
 					newNS := update.Namespace + "." + update.TableName
 					if ns != newNS {
@@ -973,8 +967,6 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 
 	return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil
 }
-
-const sqlStateObjectInUse = "55006"
 
 func classifyStreamError(err error) error {
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlStateObjectInUse {

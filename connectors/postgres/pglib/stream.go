@@ -243,10 +243,12 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 			case *pglogrepl.BeginMessage:
 				state.currentLSN = logicalMsg.FinalLSN
 			case *pglogrepl.CommitMessage:
-				select {
-				case ch <- state.updates:
-				case <-ctx.Done():
-					return nil
+				if len(state.updates) > 0 {
+					select {
+					case ch <- state.updates:
+					case <-ctx.Done():
+						return nil
+					}
 				}
 				state.updates = nil
 				fh.Add(state.currentLSN)
