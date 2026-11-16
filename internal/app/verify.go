@@ -739,34 +739,56 @@ func runVerify(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	leftC := left.Remote
-	rightC := right.Remote
-	if left.Local != nil {
-		leftC = connClient(left.Local)
-	}
-	if right.Local != nil {
-		rightC = connClient(right.Local)
-	}
+	defer options.TeardownConnector(left)
+	defer options.TeardownConnector(right)
+	return runThenDropReplication(ctx, func(ctx context.Context) error {
+		leftC := left.Remote
+		rightC := right.Remote
+		if left.Local != nil {
+			leftC = connClient(left.Local)
+		}
+		if right.Local != nil {
+			rightC = connClient(right.Local)
+		}
 
-	leftSource := source{
-		c:               leftC,
-		namespaces:      leftNamespaces,
-		parallelism:     parallelism,
-		initialSyncDone: make(chan struct{}),
-		partition:       partition,
-		totalPartitions: totalPartitions,
-	}
-	rightSource := source{
-		c:               rightC,
-		namespaces:      rightNamespaces,
-		parallelism:     parallelism,
-		initialSyncDone: make(chan struct{}),
-		partition:       partition,
-		totalPartitions: totalPartitions,
-	}
+		leftSource := source{
+			c:               leftC,
+			namespaces:      leftNamespaces,
+			parallelism:     parallelism,
+			initialSyncDone: make(chan struct{}),
+			partition:       partition,
+			totalPartitions: totalPartitions,
+		}
+		rightSource := source{
+			c:               rightC,
+			namespaces:      rightNamespaces,
+			parallelism:     parallelism,
+			initialSyncDone: make(chan struct{}),
+			partition:       partition,
+			totalPartitions: totalPartitions,
+		}
 
-	if simple {
-		tv := tailVerify{
+		if simple {
+			tv := tailVerify{
+				leftSource:         leftSource,
+				rightSource:        rightSource,
+				leftNamespacesMap:  leftNamespacesMap,
+				rightNamespacesMap: rightNamespacesMap,
+				limit:              limit,
+				cooldown:           cooldown,
+				latency:            latency,
+				projection:         projectionMap,
+			}
+
+			if err := tv.Run(ctx); err != nil {
+				slog.Error("Failed", "err", err)
+				return err
+			}
+
+			return nil
+		}
+
+		mv := memVerify{
 			leftSource:         leftSource,
 			rightSource:        rightSource,
 			leftNamespacesMap:  leftNamespacesMap,
@@ -775,31 +797,41 @@ func runVerify(c *cli.Context) error {
 			cooldown:           cooldown,
 			latency:            latency,
 			projection:         projectionMap,
+			once:               once,
 		}
 
-		if err := tv.Run(ctx); err != nil {
+		if err := mv.Run(ctx); err != nil {
 			slog.Error("Failed", "err", err)
 			return err
 		}
-
 		return nil
-	}
+	}, replicationDroppers(left, right)...)
+}
 
-	mv := memVerify{
-		leftSource:         leftSource,
-		rightSource:        rightSource,
-		leftNamespacesMap:  leftNamespacesMap,
-		rightNamespacesMap: rightNamespacesMap,
-		limit:              limit,
-		cooldown:           cooldown,
-		latency:            latency,
-		projection:         projectionMap,
-		once:               once,
-	}
+type replicationDropper interface {
+	DropReplication(context.Context) error
+}
 
-	if err := mv.Run(ctx); err != nil {
-		slog.Error("Failed", "err", err)
-		return err
+func replicationDroppers(connectors ...options.ConfiguredConnector) []replicationDropper {
+	var droppers []replicationDropper
+	for _, cc := range connectors {
+		if d, ok := cc.Local.(replicationDropper); ok {
+			droppers = append(droppers, d)
+		}
 	}
-	return nil
+	return droppers
+}
+
+const dropReplicationTimeout = 30 * time.Second
+
+func runThenDropReplication(ctx context.Context, run func(context.Context) error, droppers ...replicationDropper) error {
+	err := run(ctx)
+	dropCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dropReplicationTimeout)
+	defer cancel()
+	for _, d := range droppers {
+		if dropErr := d.DropReplication(dropCtx); dropErr != nil {
+			slog.Error("Failed to drop the replication slot or publication created by verify; drop them by hand", "err", dropErr)
+		}
+	}
+	return err
 }

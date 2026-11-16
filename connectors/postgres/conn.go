@@ -74,6 +74,8 @@ type conn struct {
 
 	docs docState
 	now  func() time.Time
+
+	created createdReplication
 }
 
 type batchSender interface {
@@ -475,27 +477,35 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 		sanitizedPublication := pgx.Identifier([]string{c.settings.PublicationName}).Sanitize()
 
 		if c.settings.Force {
-			if _, err := c.c.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %v", sanitizedPublication)); err != nil {
-				return nil, toConnectError(err)
-			}
-
-			createPublicationQ := fmt.Sprintf("CREATE PUBLICATION %v FOR TABLE %v;", sanitizedPublication, strings.Join(sanitizedNamespaces, ", "))
-			if _, err := c.c.Exec(ctx, createPublicationQ); err != nil {
-				return nil, toConnectError(err)
-			}
-
-			var count int
-			if err := c.c.QueryRow(ctx, "SELECT COUNT(*) from pg_replication_slots WHERE slot_name=$1", c.settings.SlotName).Scan(&count); err != nil {
-				return nil, toConnectError(err)
-			}
-			if count > 0 {
-				if _, err := c.c.Exec(ctx, "SELECT pg_drop_replication_slot($1)", c.settings.SlotName); err != nil {
-					return nil, toConnectError(err)
+			err := c.created.create(func(markPublication, markSlot func()) error {
+				if _, err := c.c.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %v", sanitizedPublication)); err != nil {
+					return toConnectError(err)
 				}
-			}
 
-			if _, err := c.c.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", c.settings.SlotName); err != nil {
-				return nil, toConnectError(err)
+				createPublicationQ := fmt.Sprintf("CREATE PUBLICATION %v FOR TABLE %v;", sanitizedPublication, strings.Join(sanitizedNamespaces, ", "))
+				if _, err := c.c.Exec(ctx, createPublicationQ); err != nil {
+					return toConnectError(err)
+				}
+				markPublication()
+
+				var count int
+				if err := c.c.QueryRow(ctx, "SELECT COUNT(*) from pg_replication_slots WHERE slot_name=$1", c.settings.SlotName).Scan(&count); err != nil {
+					return toConnectError(err)
+				}
+				if count > 0 {
+					if _, err := c.c.Exec(ctx, "SELECT pg_drop_replication_slot($1)", c.settings.SlotName); err != nil {
+						return toConnectError(err)
+					}
+				}
+
+				if _, err := c.c.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", c.settings.SlotName); err != nil {
+					return toConnectError(err)
+				}
+				markSlot()
+				return nil
+			})
+			if err != nil {
+				return nil, err
 			}
 		}
 

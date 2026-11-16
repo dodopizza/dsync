@@ -9,6 +9,8 @@ import (
 	"time"
 
 	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
+	"github.com/adiom-data/dsync/gen/adiom/v1/adiomv1connect"
+	"github.com/adiom-data/dsync/internal/app/options"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -311,4 +313,77 @@ func TestOnceInterruptWinsOverAReadyTimer(t *testing.T) {
 
 		require.ErrorIs(t, err, errInterrupted)
 	}
+}
+
+type fakeDropper struct {
+	calls       atomic.Int32
+	runFinished *atomic.Bool
+	after       atomic.Bool
+	ctxErr      error
+	hasDeadline bool
+	err         error
+}
+
+func (f *fakeDropper) DropReplication(ctx context.Context) error {
+	f.calls.Add(1)
+	f.after.Store(f.runFinished.Load())
+	f.ctxErr = ctx.Err()
+	_, f.hasDeadline = ctx.Deadline()
+	return f.err
+}
+
+type localHandler struct {
+	adiomv1connect.UnimplementedConnectorServiceHandler
+}
+
+func (localHandler) DropReplication(context.Context) error { return nil }
+
+func TestRunThenDropReplication(t *testing.T) {
+	boom := errors.New("source failed")
+	for name, tc := range map[string]struct {
+		runErr    error
+		interrupt bool
+		dropErr   error
+	}{
+		"clean":                 {},
+		"mismatch":              {runErr: mismatchError(1, 2)},
+		"source error":          {runErr: boom},
+		"interrupt":             {runErr: errInterrupted, interrupt: true},
+		"clean, cleanup fails":  {dropErr: errors.New("slot busy")},
+		"source error, cleanup": {runErr: boom, dropErr: errors.New("slot busy")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var finished atomic.Bool
+			left := &fakeDropper{runFinished: &finished, err: tc.dropErr}
+			right := &fakeDropper{runFinished: &finished, err: tc.dropErr}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			err := runThenDropReplication(ctx, func(ctx context.Context) error {
+				if tc.interrupt {
+					cancel()
+				}
+				finished.Store(true)
+				return tc.runErr
+			}, left, right)
+
+			require.Equal(t, tc.runErr, err)
+			for _, d := range []*fakeDropper{left, right} {
+				require.Equal(t, int32(1), d.calls.Load())
+				require.True(t, d.after.Load())
+				require.NoError(t, d.ctxErr)
+				require.True(t, d.hasDeadline)
+			}
+		})
+	}
+}
+
+func TestReplicationDroppersPicksLocalConnectorsThatImplementIt(t *testing.T) {
+	droppers := replicationDroppers(
+		options.ConfiguredConnector{Local: localHandler{}},
+		options.ConfiguredConnector{Local: adiomv1connect.UnimplementedConnectorServiceHandler{}},
+		options.ConfiguredConnector{},
+	)
+
+	require.Len(t, droppers, 1)
 }
