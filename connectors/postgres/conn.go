@@ -20,7 +20,6 @@ import (
 	"github.com/adiom-data/dsync/gen/adiom/v1/adiomv1connect"
 	"github.com/cespare/xxhash"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"golang.org/x/sync/errgroup"
@@ -161,7 +160,7 @@ func NewConn(ctx context.Context, settings PostgresSettings) (*conn, error) {
 	}
 
 	if !validSlotName(settings.SlotName) {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid replication slot name"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, errInvalidSlotName)
 	}
 
 	rUrl, err := createReplicationUrl(url)
@@ -198,6 +197,7 @@ func NewConn(ctx context.Context, settings PostgresSettings) (*conn, error) {
 
 	pkeys, err := getTablePrimaryKeySchema(ctx, c)
 	if err != nil {
+		c.Close()
 		return nil, err
 	}
 
@@ -564,6 +564,9 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
+	if !validSlotName(cursor.SlotName) {
+		return connect.NewError(connect.CodeInvalidArgument, errInvalidSlotName)
+	}
 
 	cs := &pglib.ChangeStream{
 		ReplicationURL:      c.replicationUrl,
@@ -635,7 +638,9 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 					}
 					batch = append(batch, up)
 				}
-				lastSafeLSN = updates[len(updates)-1].LSN
+				if len(updates) > 0 {
+					lastSafeLSN = updates[len(updates)-1].LSN
+				}
 				if maxBatchSize > 0 && len(batch) > maxBatchSize {
 					if err := send(); err != nil {
 						return err
@@ -973,12 +978,7 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 	return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil
 }
 
-func classifyStreamError(err error) error {
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlStateObjectInUse {
-		return connect.NewError(connect.CodeUnavailable, err)
-	}
-	return toConnectError(err)
-}
+var errInvalidSlotName = errors.New("invalid replication slot name")
 
 var slotNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
 

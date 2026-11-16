@@ -42,3 +42,8 @@ func TestRunErrorsHideConnectionString(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicationNamesArgQuotesIdentifierInLiteral(t *testing.T) {
+	assert.Equal(t, `publication_names '"dsync_pub"'`, publicationNamesArg("dsync_pub"))
+	assert.Equal(t, `publication_names '"My''Pub"",x"'`, publicationNamesArg(`My'Pub",x`))
+}

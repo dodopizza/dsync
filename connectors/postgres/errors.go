@@ -67,3 +67,10 @@ func sqlStateCode(sqlState string) connect.Code {
 	}
 	return connect.CodeInternal
 }
+
+func classifyStreamError(err error) error {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlStateObjectInUse {
+		return connect.NewError(connect.CodeUnavailable, err)
+	}
+	return toConnectError(err)
+}

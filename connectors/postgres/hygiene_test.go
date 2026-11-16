@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -100,4 +101,15 @@ func TestValidSlotNames(t *testing.T) {
 	assert.True(t, validSlotName("dsync_slot"))
 	assert.True(t, validSlotName(strings.Repeat("a", 63)))
 	assert.True(t, validSlotName("s_1"))
+}
+
+func TestStreamUpdatesRejectsInvalidCursorSlotName(t *testing.T) {
+	cursor, err := (&streamCursor{SlotName: "s; DROP", PublicationName: "p"}).Encode()
+	require.NoError(t, err)
+	c := &conn{replicationUrl: "postgres://u@127.0.0.1:1/d?sslmode=disable&replication=database"}
+
+	err = c.StreamUpdates(t.Context(), connect.NewRequest(&adiomv1.StreamUpdatesRequest{Cursor: cursor}), nil)
+
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	assert.EqualError(t, err, "invalid_argument: invalid replication slot name")
 }

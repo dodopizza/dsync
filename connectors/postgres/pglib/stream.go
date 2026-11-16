@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -152,7 +154,7 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 
 	pluginArguments := []string{
 		"proto_version '2'",
-		fmt.Sprintf("publication_names '%v'", c.PublicationName),
+		publicationNamesArg(c.PublicationName),
 		"messages 'true'",
 		"streaming 'true'",
 	}
@@ -307,4 +309,8 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 			}
 		}
 	}
+}
+
+func publicationNamesArg(name string) string {
+	return "publication_names '" + strings.ReplaceAll(pgx.Identifier{name}.Sanitize(), "'", "''") + "'"
 }
