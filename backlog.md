@@ -26,9 +26,16 @@ The witness and the Cosmos DB stream read a field `a.b` as a nested path; the do
 
 Server errors print the SQLSTATE plus schema, table, column and constraint names. A reviewer asked to drop the names too: a schema named after a login role shows that role, and server-side code can fill these fields with any text. Kept for diagnosis; revisit if such schemas appear.
 
-### Extended JSON form of stored documents [#22]
+### Document mode contract [#22]
 
-Documents are stored as relaxed Extended JSON in `jsonb`. Whether readers need the canonical form is a question for the owners of the services that will read the tables.
+To confirm with the owners of the services that will read the tables:
+
+* Documents are stored as canonical Extended JSON in `jsonb` (`{"$numberInt":"2"}`); the witness and verify need the BSON types. Readers may want the relaxed form.
+* int32, int64 and whole doubles of the same value share one id; a fractional double and a decimal128 of the same value are different ids.
+* An extra column whose field is absent or null is written as NULL, which bypasses a column DEFAULT and fails on `NOT NULL DEFAULT`.
+* A changed key-column value at the source leaves the old row in place.
+* The table shape is read once; a schema change during a run needs a restart.
+* Without `--updated-at-field` the updated-at column holds the transfer time, not the time of the change.
 
 ## Checks not yet run
 
@@ -37,6 +44,7 @@ Run locally in containers so far: connection error texts, state store with wrong
 * Against the real source:
     * shard key inventory and collection sizes;
     * whether `documentKey` carries the shard key on change-stream events [#21];
+    * whether a collection with no recent changes yields a resume token when the source key is read-only: one namespace without a token fails the whole plan [#21];
     * `$sample` cost and behaviour, string order under a non-default collation, cross-type sort order [#21];
     * read consistency of the source lookup in a delete pass [#27];
     * request-unit cost and throttling of a delete pass.
@@ -121,7 +129,9 @@ Run locally in containers so far: connection error texts, state store with wrong
 
 ## Cosmos DB source and emulated deletes
 
-* The connector inserts and deletes a helper document in the source collection to get a resume token, so it needs write access to the source [#21].
+* The connector inserts and deletes a helper document in the source collection to get a resume token. With a read-only source key that write does not happen and the token must come from the collection's own changes [#21].
+* ObjectId ranges with no documents become tasks that still report the target document count, so progress estimates can be inflated [#21].
+* The id sample is capped at 10000, so a collection gets at most about 10000 ranges [#21].
 * Collections with mixed `_id` types are copied as one task [#21].
 * The planner's debug log prints the smallest and largest `_id` [#21].
 * With `--full-document-key`, shard keys are fetched one namespace at a time at plan time [#21].
