@@ -68,6 +68,32 @@ func encodeResumeToken(epoch int64, token []byte) ([]byte, error) {
 	})
 }
 
+type cursorSender struct {
+	mu    sync.Locker
+	first error
+}
+
+func sendWithCursor(s *cursorSender, tokenMap *TokenMap, epoch int64, loc iface.Location, token bson.Raw, send func(cursor []byte) error) (err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.first != nil {
+		return fmt.Errorf("an earlier send on this stream failed: %w", s.first)
+	}
+	defer func() { s.first = err }()
+	if token != nil {
+		tokenMap.AddToken(loc, token)
+	}
+	encodedToken, err := tokenMap.encodeMap()
+	if err != nil {
+		return fmt.Errorf("failed to encode token map: %w", err)
+	}
+	cursor, err := encodeResumeToken(epoch, encodedToken)
+	if err != nil {
+		return fmt.Errorf("failed to encode cursor: %w", err)
+	}
+	return send(cursor)
+}
+
 func decodeResumeToken(input []byte) (int64, []byte, error) {
 	raw := bson.Raw(input)
 	if err := raw.Validate(); err != nil {
@@ -545,7 +571,7 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 		return shardKeyCheckError(err)
 	}
 
-	var sendMutex sync.Mutex
+	sender := &cursorSender{mu: &sync.Mutex{}}
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errCh := make(chan error, len(namespaces)+1)
@@ -576,24 +602,16 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 					return checkForDeletes(streamCtx, c.client, c.witnessMongoClient, nss)
 				}, func(loc iface.Location, updates []*adiomv1.Update) error {
 					c.deletesCount.Add(uint64(len(updates)))
-					encodedToken, err := tokenMap.encodeMap()
-					if err != nil {
-						return fmt.Errorf("failed to encode emulated-delete token map: %w", err)
-					}
-					nextCursor, err := encodeResumeToken(readPlanStartAt, encodedToken)
-					if err != nil {
-						return fmt.Errorf("failed to encode emulated-delete cursor: %w", err)
-					}
-					sendMutex.Lock()
-					defer sendMutex.Unlock()
-					if err := s.Send(&adiomv1.StreamUpdatesResponse{
-						Updates:    updates,
-						Namespace:  fmt.Sprintf("%v.%v", loc.Database, loc.Collection),
-						NextCursor: nextCursor,
-					}); err != nil {
-						return fmt.Errorf("failed to send emulated deletes: %w", err)
-					}
-					return nil
+					return sendWithCursor(sender, tokenMap, readPlanStartAt, loc, nil, func(cursor []byte) error {
+						if err := s.Send(&adiomv1.StreamUpdatesResponse{
+							Updates:    updates,
+							Namespace:  fmt.Sprintf("%v.%v", loc.Database, loc.Collection),
+							NextCursor: cursor,
+						}); err != nil {
+							return fmt.Errorf("failed to send emulated deletes: %w", err)
+						}
+						return nil
+					})
 				})
 				if err != nil {
 					reportError(err)
@@ -632,25 +650,16 @@ func (c *conn) StreamUpdates(ctx context.Context, r *connect.Request[adiomv1.Str
 			defer changeStream.Close(streamCtx)
 
 			err = streamNamespaceEvents(streamCtx, changeStream, loc, shardKeyFields[ns], func(updates []*adiomv1.Update, token bson.Raw) error {
-				tokenMap.AddToken(loc, token)
-				encodedToken, err := tokenMap.encodeMap()
-				if err != nil {
-					return fmt.Errorf("failed to encode update token map: %w", err)
-				}
-				nextCursor, err := encodeResumeToken(readPlanStartAt, encodedToken)
-				if err != nil {
-					return fmt.Errorf("failed to encode update cursor: %w", err)
-				}
-				sendMutex.Lock()
-				defer sendMutex.Unlock()
-				if err := s.Send(&adiomv1.StreamUpdatesResponse{
-					Updates:    updates,
-					Namespace:  fmt.Sprintf("%v.%v", ns.Db, ns.Col),
-					NextCursor: nextCursor,
-				}); err != nil {
-					return fmt.Errorf("failed to send updates for %s.%s: %w", loc.Database, loc.Collection, err)
-				}
-				return nil
+				return sendWithCursor(sender, tokenMap, readPlanStartAt, loc, token, func(cursor []byte) error {
+					if err := s.Send(&adiomv1.StreamUpdatesResponse{
+						Updates:    updates,
+						Namespace:  fmt.Sprintf("%v.%v", ns.Db, ns.Col),
+						NextCursor: cursor,
+					}); err != nil {
+						return fmt.Errorf("failed to send updates for %s.%s: %w", loc.Database, loc.Collection, err)
+					}
+					return nil
+				})
 			})
 			reportError(err)
 		}()
