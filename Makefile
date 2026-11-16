@@ -48,8 +48,8 @@ test-mongo:
 	MONGO_TEST=mongodb://mongotest:27019/?replicaSet=datatest go test -count=1 -v --tags=external github.com/adiom-data/dsync/connectors/mongo
 
 test-postgres:
-	@test -n "$$POSTGRES_TEST" || { echo 'Set POSTGRES_TEST to a PostgreSQL DSN (LOGIN, CONNECT and CREATE on the database is enough)'; exit 1; }
-	go test -count=1 -v --tags=external github.com/adiom-data/dsync/connectors/postgres
+	@test -n "$$POSTGRES_TEST_URL" || { echo 'Set POSTGRES_TEST_URL to a PostgreSQL DSN (superuser, or a role with CREATEROLE, REPLICATION and CREATE on the database, plus GRANT SET ON PARAMETER session_replication_role, on a server with wal_level=logical)'; exit 1; }
+	go test -count=1 -v --tags=external ./connectors/postgres/... ./connectors/sqlbatch
 
 test-dynamodb:
 	echo 'Ensure that localstack is running'

@@ -3,6 +3,7 @@ package pglib
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func TestRunErrorsHideConnectionString(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 
-			err := (&ChangeStream{ReplicationURL: url, ReplicationSlotName: "s", PublicationName: "p"}).Run(ctx, make(chan []Update, 1))
+			err := (&ChangeStream{ReplicationURL: url, ReplicationSlotName: "s", PublicationName: "p"}).Run(ctx, make(chan UpdateBatch, 1))
 
 			require.Error(t, err)
 			assert.NotContains(t, err.Error(), password)
@@ -46,4 +47,25 @@ func TestRunErrorsHideConnectionString(t *testing.T) {
 func TestPublicationNamesArgQuotesIdentifierInLiteral(t *testing.T) {
 	assert.Equal(t, `publication_names '"dsync_pub"'`, publicationNamesArg("dsync_pub"))
 	assert.Equal(t, `publication_names '"My''Pub"",x"'`, publicationNamesArg(`My'Pub",x`))
+}
+
+func TestFillUnchangedValues(t *testing.T) {
+	newValues := map[string]interface{}{"id": int32(1), "name": "new", "toasted": unchangedToastValue{}}
+	oldValues := map[string]interface{}{"id": int32(1), "name": "old", "toasted": "large value"}
+
+	fillUnchangedValues(newValues, oldValues)
+
+	want := map[string]interface{}{"id": int32(1), "name": "new", "toasted": "large value"}
+	if !reflect.DeepEqual(newValues, want) {
+		t.Fatalf("values = %#v, want %#v", newValues, want)
+	}
+}
+
+func TestUnchangedToastColumns(t *testing.T) {
+	values := map[string]interface{}{"id": int32(1), "toasted": unchangedToastValue{}}
+	got := unchangedToastColumns(values)
+	want := []string{"toasted"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("columns = %#v, want %#v", got, want)
+	}
 }
