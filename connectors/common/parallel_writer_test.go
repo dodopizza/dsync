@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"runtime"
 	"sync"
 	"testing"
@@ -491,4 +492,51 @@ func TestParallelWriterTaskAndCDCBarriersInFlightTogether(t *testing.T) {
 		require.NoError(t, h.stop())
 		assert.Empty(t, c.fired)
 	})
+}
+
+func pwShardedRowEvent(mutation uint, row int, withShardKey bool) iface.DataMessage {
+	id := []*adiomv1.BsonValue{{Name: "_id", Type: 2, Data: fmt.Appendf(nil, "row-%d", row)}}
+	if withShardKey {
+		id = append(id, &adiomv1.BsonValue{Name: "tenant", Type: 2, Data: fmt.Appendf(nil, "tenant-%d", row%5)})
+	}
+	return iface.DataMessage{MutationType: mutation, Loc: "db.col", Id: id}
+}
+
+func TestRowEventsWithDivergentIdShapesRouteToOneWorker(t *testing.T) {
+	for row := 0; row < 200; row++ {
+		update := hashDataMsgId(pwShardedRowEvent(iface.MutationType_Update, row, true)) % pwWorkers
+		partial := hashDataMsgId(pwShardedRowEvent(iface.MutationType_Apply, row, false)) % pwWorkers
+		remove := hashDataMsgId(pwShardedRowEvent(iface.MutationType_Delete, row, true)) % pwWorkers
+		assert.Equal(t, update, partial, "row %d", row)
+		assert.Equal(t, update, remove, "row %d", row)
+	}
+}
+
+func TestIdsWithoutAnIdNamedPartHashOverAllParts(t *testing.T) {
+	for _, names := range [][]string{{"", ""}, {"a", "b"}, {""}} {
+		var id []*adiomv1.BsonValue
+		expected := fnv.New32a()
+		for i, name := range names {
+			data := fmt.Appendf(nil, "part-%d", i)
+			id = append(id, &adiomv1.BsonValue{Name: name, Data: data})
+			_, _ = expected.Write(data)
+		}
+		assert.Equal(t, int(expected.Sum32()), hashDataMsgId(iface.DataMessage{Id: id}), "%v", names)
+	}
+}
+
+func TestIdsEqualInIdButDifferentInOtherPartsShareAWorker(t *testing.T) {
+	idPart := &adiomv1.BsonValue{Name: "_id", Data: []byte("row")}
+	a := iface.DataMessage{Id: []*adiomv1.BsonValue{idPart, {Name: "tenant", Data: []byte("t1")}}}
+	b := iface.DataMessage{Id: []*adiomv1.BsonValue{{Name: "region", Data: []byte("eu")}, idPart, {Name: "tenant", Data: []byte("t2")}}}
+
+	assert.Equal(t, hashDataMsgId(a), hashDataMsgId(b))
+}
+
+func TestDifferentIdValuesSpreadAcrossWorkers(t *testing.T) {
+	workers := map[int]bool{}
+	for row := 0; row < 200; row++ {
+		workers[hashDataMsgId(pwShardedRowEvent(iface.MutationType_Update, row, true))%pwWorkers] = true
+	}
+	assert.Len(t, workers, pwWorkers)
 }

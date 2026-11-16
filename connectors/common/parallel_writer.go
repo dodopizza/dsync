@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 
+	adiomv1 "github.com/adiom-data/dsync/gen/adiom/v1"
 	"github.com/adiom-data/dsync/protocol/iface"
 	"golang.org/x/exp/rand"
 	"golang.org/x/sync/errgroup"
@@ -105,8 +107,12 @@ func (bwa *ParallelWriter) StopAndWait() error {
 }
 
 func hashDataMsgId(dataMsg iface.DataMessage) int {
+	parts := dataMsg.Id
+	if i := slices.IndexFunc(parts, func(d *adiomv1.BsonValue) bool { return d.GetName() == "_id" }); i >= 0 {
+		parts = parts[i : i+1]
+	}
 	hash := fnv.New32a()
-	for _, d := range dataMsg.Id {
+	for _, d := range parts {
 		_, _ = hash.Write(d.GetData())
 	}
 	return int(hash.Sum32())
