@@ -92,6 +92,7 @@ type listingSource struct {
 	streamErr   error
 	started     *atomic.Int32
 	returned    *atomic.Int32
+	sent        chan struct{}
 }
 
 func (h listingSource) GetInfo(context.Context, *connect.Request[adiomv1.GetInfoRequest]) (*connect.Response[adiomv1.GetInfoResponse], error) {
@@ -124,6 +125,9 @@ func (h listingSource) StreamUpdates(ctx context.Context, _ *connect.Request[adi
 	}
 	if err := s.Send(&adiomv1.StreamUpdatesResponse{Namespace: "db.col", Updates: h.updates}); err != nil {
 		return err
+	}
+	if h.sent != nil {
+		close(h.sent)
 	}
 	if h.streamBlock {
 		<-ctx.Done()

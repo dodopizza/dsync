@@ -492,6 +492,11 @@ func (m *memVerify) Run(ctx context.Context) error {
 			if egCtx.Err() != nil {
 				return nil
 			}
+			mut.RLock()
+			for _, verifier := range verifiers {
+				verifier.Update(m.latency, 0)
+			}
+			mut.RUnlock()
 			takeReport()
 			stopped.Store(true)
 			cancel()

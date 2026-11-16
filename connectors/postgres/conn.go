@@ -482,11 +482,11 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 					return toConnectError(err)
 				}
 
+				markPublication()
 				createPublicationQ := fmt.Sprintf("CREATE PUBLICATION %v FOR TABLE %v;", sanitizedPublication, strings.Join(sanitizedNamespaces, ", "))
 				if _, err := c.c.Exec(ctx, createPublicationQ); err != nil {
 					return toConnectError(err)
 				}
-				markPublication()
 
 				var count int
 				if err := c.c.QueryRow(ctx, "SELECT COUNT(*) from pg_replication_slots WHERE slot_name=$1", c.settings.SlotName).Scan(&count); err != nil {
@@ -498,10 +498,10 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 					}
 				}
 
+				markSlot()
 				if _, err := c.c.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", c.settings.SlotName); err != nil {
 					return toConnectError(err)
 				}
-				markSlot()
 				return nil
 			})
 			if err != nil {

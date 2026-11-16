@@ -57,6 +57,8 @@ func TestCreatedReplicationDropWaitsForARunningCreateAndSeesItsMarks(t *testing.
 	var r createdReplication
 	inCreate := make(chan struct{})
 	finishCreate := make(chan struct{})
+	releaseCreate := sync.OnceFunc(func() { close(finishCreate) })
+	t.Cleanup(releaseCreate)
 	createDone := make(chan error, 1)
 	go func() {
 		createDone <- r.create(func(markPublication, markSlot func()) error {
@@ -67,7 +69,11 @@ func TestCreatedReplicationDropWaitsForARunningCreateAndSeesItsMarks(t *testing.
 			return nil
 		})
 	}()
-	<-inCreate
+	select {
+	case <-inCreate:
+	case <-time.After(3 * time.Second):
+		t.Fatal("create never started")
+	}
 	type seen struct{ slot, publication bool }
 	dropped := make(chan seen, 1)
 	go func() {
@@ -80,9 +86,14 @@ func TestCreatedReplicationDropWaitsForARunningCreateAndSeesItsMarks(t *testing.
 		t.Fatal("drop did not wait for the running create")
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(finishCreate)
+	releaseCreate()
 
-	require.NoError(t, <-createDone)
+	select {
+	case err := <-createDone:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("create did not finish")
+	}
 	select {
 	case got := <-dropped:
 		require.Equal(t, seen{slot: true, publication: true}, got)
@@ -111,21 +122,27 @@ func TestCreatedReplicationIsRaceCleanUnderConcurrentUse(t *testing.T) {
 	var r createdReplication
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = r.create(func(markPublication, markSlot func()) error {
 				markPublication()
 				markSlot()
 				return nil
 			})
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			_, _, _ = dropSeen(&r)
-		}()
+		})
 	}
-	wg.Wait()
+	joined := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent create and drop did not finish")
+	}
 }
 
 func TestDropReplicationDoesNothingWhenNothingWasCreated(t *testing.T) {

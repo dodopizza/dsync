@@ -249,13 +249,13 @@ func TestInitialSyncDoneWaitsForTheConsumerToFinishTheLastDocument(t *testing.T)
 	s := newTestSource(t, listingSource{docs: docs}, 0, 0)
 	inLast := make(chan struct{})
 	release := make(chan struct{})
-	var releaseOnce sync.Once
+	releaseOnce := sync.OnceFunc(func() { close(release) })
 	var seen atomic.Int32
 	var processErr error
 	finished := make(chan struct{})
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(func() {
-		releaseOnce.Do(func() { close(release) })
+		releaseOnce()
 		cancel()
 		select {
 		case <-finished:
@@ -283,7 +283,7 @@ func TestInitialSyncDoneWaitsForTheConsumerToFinishTheLastDocument(t *testing.T)
 	defer earlyCancel()
 	require.False(t, s.WaitForInitialSync(early))
 
-	releaseOnce.Do(func() { close(release) })
+	releaseOnce()
 	late, lateCancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer lateCancel()
 	require.True(t, s.WaitForInitialSync(late))
@@ -386,4 +386,26 @@ func TestReplicationDroppersPicksLocalConnectorsThatImplementIt(t *testing.T) {
 	)
 
 	require.Len(t, droppers, 1)
+}
+
+func TestOnceJudgesAStreamChangeThatArrivedAfterTheInitialRead(t *testing.T) {
+	for range 30 {
+		sent := make(chan struct{})
+		m := newMemVerify(t,
+			listingSource{docs: [][]byte{idDoc(t, "a", 1)}, streamBlock: true},
+			listingSource{docs: [][]byte{idDoc(t, "a", 2)}, updates: streamOf(t, "a", 2), streamBlock: true, sent: sent})
+		m.once = true
+		m.poll = time.Hour
+		m.after = func(time.Duration) <-chan time.Time {
+			<-sent
+			time.Sleep(5 * m.latency)
+			ch := make(chan time.Time, 1)
+			ch <- time.Now()
+			return ch
+		}
+
+		err := runWithDeadline(t, m.Run)
+
+		require.ErrorIs(t, err, ErrVerifyMismatch)
+	}
 }

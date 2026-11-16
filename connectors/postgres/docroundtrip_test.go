@@ -2,9 +2,11 @@ package postgres
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
+	"maps"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,15 +31,8 @@ func writeJSONB(t *testing.T, out *bytes.Buffer, v any) {
 	t.Helper()
 	switch v := v.(type) {
 	case map[string]any:
-		keys := make([]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			if len(keys[i]) != len(keys[j]) {
-				return len(keys[i]) < len(keys[j])
-			}
-			return keys[i] < keys[j]
+		keys := slices.SortedFunc(maps.Keys(v), func(a, b string) int {
+			return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
 		})
 		out.WriteByte('{')
 		for i, k := range keys {
@@ -69,7 +64,7 @@ func writeJSONB(t *testing.T, out *bytes.Buffer, v any) {
 func hashOf(t *testing.T, raw []byte) uint64 {
 	t.Helper()
 	h := xxhash.New()
-	common.HashBson(h, bson.Raw(raw), false, nil)
+	require.NoError(t, common.HashBson(h, bson.Raw(raw), false, nil))
 	return h.Sum64()
 }
 

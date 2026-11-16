@@ -316,7 +316,7 @@ func handleLogical(ctx context.Context, state *replState, fh *flushHelper, ch ch
 		if err != nil {
 			return err
 		}
-		var oldValues map[string]interface{}
+		var oldValues map[string]any
 		if logicalMsg.OldTuple != nil {
 			_, _, oldValues, err = decodeToMap(state, logicalMsg.RelationID, logicalMsg.OldTuple.Columns)
 			if err != nil {

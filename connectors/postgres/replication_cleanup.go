@@ -46,7 +46,7 @@ func (r *createdReplication) drop(fn func(slot, publication bool) error) error {
 
 func retryWhileSlotInUse(ctx context.Context, attempts int, pause time.Duration, op func() error) error {
 	var err error
-	for i := 0; i < attempts; i++ {
+	for i := range attempts {
 		if err = op(); err == nil {
 			return nil
 		}
