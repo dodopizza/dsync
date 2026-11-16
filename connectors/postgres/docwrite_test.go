@@ -277,24 +277,24 @@ func TestDocStateLoadsOncePerNamespaceUnderParallelFirstWritesAndDoesNotCacheFai
 
 func TestDocWriteErrorKeepsPositionColumnAndSQLStateButNeverTheServerMessage(t *testing.T) {
 	pgErr := &pgconn.PgError{Code: "22P02", Message: `invalid input syntax for type integer: "` + marker + `"`, ColumnName: "MixedCase"}
-	err := docWriteError(3, fmt.Errorf("wrapped: %w", pgErr))
+	err := positionedWriteError("document", 3, fmt.Errorf("wrapped: %w", pgErr))
 	assert.Contains(t, err.Error(), "document 3")
 	assert.Contains(t, err.Error(), "MixedCase")
 	assert.Contains(t, err.Error(), "22P02")
 	assert.NotContains(t, err.Error(), marker)
 
-	unique := docWriteError(2, &pgconn.PgError{Code: "23505", Message: marker, Detail: "Key (n)=(" + marker + ") already exists.", ConstraintName: "numbers_n_key", TableName: "numbers"})
+	unique := positionedWriteError("document", 2, &pgconn.PgError{Code: "23505", Message: marker, Detail: "Key (n)=(" + marker + ") already exists.", ConstraintName: "numbers_n_key", TableName: "numbers"})
 	assert.Equal(t, "internal: document 2: constraint numbers_n_key: SQLSTATE 23505", unique.Error())
 
-	clientErr := docWriteError(1, fmt.Errorf("unable to encode %s into binary format", marker))
+	clientErr := positionedWriteError("document", 1, fmt.Errorf("unable to encode %s into binary format", marker))
 	assert.NotContains(t, clientErr.Error(), marker)
 	assert.Contains(t, clientErr.Error(), "document 1")
 
-	serialization := docWriteError(0, &pgconn.PgError{Code: "40001", Message: marker})
+	serialization := positionedWriteError("document", 0, &pgconn.PgError{Code: "40001", Message: marker})
 	assert.Equal(t, connect.CodeAborted, connect.CodeOf(serialization))
 	assert.NotContains(t, serialization.Error(), marker)
 
-	unavailable := docWriteError(-1, &net.OpError{Op: "read", Err: errors.New("reset")})
+	unavailable := positionedWriteError("document", -1, &net.OpError{Op: "read", Err: errors.New("reset")})
 	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(unavailable))
 }
 

@@ -283,10 +283,6 @@ func docBatchArgs(plan *docPlan, data [][]byte, now time.Time) ([][]any, error) 
 	return batch, nil
 }
 
-func docWriteError(index int, err error) error {
-	return positionedWriteError("document", index, err)
-}
-
 func positionedWriteError(label string, index int, err error) error {
 	position := "write failed"
 	if index >= 0 {
