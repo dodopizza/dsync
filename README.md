@@ -99,6 +99,32 @@ After a restart the transfer resumes from the last checkpoint, so writes made af
 * Document mode without `--updated-at-field` leaves the `--updated-at-column` value at the replay time whenever the replayed window holds more than one version of a document, the newest included. With `--updated-at-field`, the value comes from the document when that field holds a date; a missing or null field falls back to the write time, and a non-date value fails the write.
 * A value moved from one row to another under a secondary UNIQUE constraint inside the replayed window can fail the replay with SQLSTATE 23505.
 
+## PostgreSQL state store
+
+An alternative to the MongoDB `--metadata` store. It keeps dsync flow state in one PostgreSQL table, `dsync_state.objects`. Without any metadata setting dsync uses a temporary store, and flow state does not survive a restart.
+* Select it by setting the environment variable `DSYNC_METADATA_POSTGRES` to a PostgreSQL connection string. The value is read only from the environment: there is no command-line flag, and a `--config` file key is ignored.
+* Setting it together with `--metadata` is an error.
+* The connection string is never printed. Database errors carry a fixed message, plus the SQLSTATE when the server returned one, or otherwise a failure class (could not connect, network timeout, context cancelled or deadline exceeded).
+* dsync runs no DDL. Setup only checks that the table can be read, and otherwise fails with a pointer to this section. Missing INSERT or UPDATE privileges surface at the first write, DELETE at the first delete, with SQLSTATE 42501. A failed delete of the flow state on `--cleanup` is only logged: the run exits 0, the row stays, and the next run with the same options resumes that flow.
+* It can live on the same server as the PostgreSQL destination; it uses its own connection string.
+* Values are stored as BSON in `data`. `updated_at` is the time of the last write.
+* After setup, these errors are retried: SQLSTATE class 08 (connection exceptions), 40001, 40P01, 55P03, 57P01, 57P02, 57P03, 57P05, 25P03, 53300 and 53200; network errors and unexpected EOF; and attempt timeouts that surface as a context deadline. Other errors, including 53100, 53400 and 57014, fail immediately. Retries run under `--meta-retries` and `--meta-retry-max-interval`, with a 30 s timeout per attempt. The setup check itself is not retried.
+* The store uses pgx's default prepared-statement cache, so a pooler in transaction mode (PgBouncer and similar) is not supported; connect directly or through session pooling.
+
+Setup script, run once as a role with CREATE on the database (`dsync_state_writer` is a placeholder for the role in the connection string):
+```sql
+CREATE SCHEMA dsync_state;
+CREATE TABLE dsync_state.objects (
+    store text NOT NULL,
+    id text NOT NULL,
+    data bytea NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (store, id)
+);
+GRANT USAGE ON SCHEMA dsync_state TO dsync_state_writer;
+GRANT SELECT, INSERT, UPDATE, DELETE ON dsync_state.objects TO dsync_state_writer;
+```
+
 # Quickstart
 Follow these simple instructions to get dsync up and running and perform a migration from our Cosmos DB demo instance to your MongoDB destination.
 

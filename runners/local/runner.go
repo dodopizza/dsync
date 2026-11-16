@@ -21,6 +21,7 @@ import (
 	"github.com/adiom-data/dsync/internal/util"
 	"github.com/adiom-data/dsync/protocol/iface"
 	statestoreMongo "github.com/adiom-data/dsync/statestores/mongo"
+	statestorePostgres "github.com/adiom-data/dsync/statestores/postgres"
 	statestoreTemp "github.com/adiom-data/dsync/statestores/temp"
 	transportLocal "github.com/adiom-data/dsync/transports/local"
 )
@@ -50,15 +51,16 @@ type RunnerLocal struct {
 }
 
 type RunnerLocalSettings struct {
-	SrcDescription       string
-	DstDescription       string
-	SrcDataType          adiomv1.DataType
-	DstDataType          adiomv1.DataType
-	TransformClient      adiomv1connect.TransformServiceClient
-	Src                  options.ConfiguredConnector
-	Dst                  options.ConfiguredConnector
-	StateStoreConnString string
-	FlowName             string
+	SrcDescription               string
+	DstDescription               string
+	SrcDataType                  adiomv1.DataType
+	DstDataType                  adiomv1.DataType
+	TransformClient              adiomv1connect.TransformServiceClient
+	Src                          options.ConfiguredConnector
+	Dst                          options.ConfiguredConnector
+	StateStoreConnString         string
+	StateStorePostgresConnString string
+	FlowName                     string
 
 	NsFromString []string
 
@@ -145,12 +147,7 @@ func NewRunnerLocal(settings RunnerLocalSettings) *RunnerLocal {
 	}
 
 	//XXX: implement and use a function isStateful() from connectors to determine if a connector is stateful (although we may not care too much about it for SaaS deployments)
-	if settings.StateStoreConnString != "" { //if the statestore is explicitly set, use it
-		r.statestore = statestoreMongo.NewMongoStateStore(statestoreMongo.StateStoreSettings{ConnectionString: settings.StateStoreConnString, Retry: settings.MetaRetry})
-	} else {
-		// otherwise, use a stub statestore because no statestore is needed
-		r.statestore = statestoreTemp.NewTempStateStore()
-	}
+	r.statestore = newStatestore(settings)
 
 	numParallelIntegrityCheckTasks := 4 // default
 	if settings.NumParallelIntegrityCheckTasks != 0 {
@@ -362,5 +359,16 @@ func applyReverseIfNeeded(settings *RunnerLocalSettings) {
 			// A shared name would not, and it would resume from the forward flow's position.
 			settings.FlowName = "reverse:" + settings.FlowName
 		}
+	}
+}
+
+func newStatestore(settings RunnerLocalSettings) iface.Statestore {
+	switch {
+	case settings.StateStoreConnString != "":
+		return statestoreMongo.NewMongoStateStore(statestoreMongo.StateStoreSettings{ConnectionString: settings.StateStoreConnString, Retry: settings.MetaRetry})
+	case settings.StateStorePostgresConnString != "":
+		return statestorePostgres.NewPostgresStateStore(statestorePostgres.StateStoreSettings{ConnectionString: settings.StateStorePostgresConnString, Retry: settings.MetaRetry})
+	default:
+		return statestoreTemp.NewTempStateStore()
 	}
 }

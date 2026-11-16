@@ -6,7 +6,9 @@
 package options
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/adiom-data/dsync/internal/util"
@@ -16,7 +18,8 @@ import (
 type Options struct {
 	Verbosity string
 
-	StateStoreConnString string
+	StateStoreConnString         string
+	StateStorePostgresConnString string
 
 	Logfile string
 
@@ -58,6 +61,10 @@ func NewFromCLIContext(c *cli.Context) (Options, error) {
 
 	o.Verbosity = c.String("verbosity")
 	o.StateStoreConnString = c.String("metadata")
+	o.StateStorePostgresConnString = os.Getenv("DSYNC_METADATA_POSTGRES")
+	if o.StateStoreConnString != "" && o.StateStorePostgresConnString != "" {
+		return o, errors.New("--metadata and DSYNC_METADATA_POSTGRES are mutually exclusive")
+	}
 	o.Logfile = c.String("logfile")
 	o.NamespaceFrom = c.StringSlice("namespace")
 	o.FlowName = c.String("flow-name")

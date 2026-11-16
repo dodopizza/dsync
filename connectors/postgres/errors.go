@@ -74,3 +74,11 @@ func classifyStreamError(err error) error {
 	}
 	return toConnectError(err)
 }
+
+func IsTransientError(err error) bool {
+	switch connectCode(err) {
+	case connect.CodeUnavailable, connect.CodeAborted, connect.CodeResourceExhausted, connect.CodeDeadlineExceeded:
+		return true
+	}
+	return false
+}

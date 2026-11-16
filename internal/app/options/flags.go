@@ -56,7 +56,7 @@ func GetFlagsAndBeforeFunc() ([]cli.Flag, cli.BeforeFunc) {
 		}),
 		altsrc.NewStringFlag(&cli.StringFlag{
 			Name:     "metadata",
-			Usage:    "metadata store connection string",
+			Usage:    "metadata store connection string; for a PostgreSQL state store set DSYNC_METADATA_POSTGRES instead (schema dsync_state, pre-created by the README script; the value is read only from the environment)",
 			Aliases:  []string{"m"},
 			Category: "Endpoint Configuration",
 			Required: false,
