@@ -103,17 +103,26 @@ func eventWithKey(t *testing.T, op string, doc bson.D, key bson.D, fields []stri
 
 var shardedKey = bson.D{{Key: "_id", Value: "doc1"}, {Key: "tenant", Value: "t1"}, {Key: "region", Value: int32(7)}}
 
-func TestUpsertAndEventWithoutFullDocumentCarryTheSameId(t *testing.T) {
+func TestUpsertAndDeleteCarryTheSameId(t *testing.T) {
 	fields := []string{"region", "tenant"}
 	upsert, err := eventWithKey(t, "update", shardedDoc, shardedKey, fields)
 	require.NoError(t, err)
 
-	for _, op := range []string{"update", "replace", "delete"} {
-		other, err := eventWithKey(t, op, nil, shardedKey, fields)
+	deleted, err := eventWithKey(t, "delete", nil, shardedKey, fields)
 
-		require.NoError(t, err)
-		require.Equal(t, util.BsonIdKey(upsert.GetId()), util.BsonIdKey(other.GetId()), op)
-		require.Equal(t, []string{"_id", "region", "tenant"}, idNames(other))
+	require.NoError(t, err)
+	require.Equal(t, util.BsonIdKey(upsert.GetId()), util.BsonIdKey(deleted.GetId()))
+	require.Equal(t, []string{"_id", "region", "tenant"}, idNames(deleted))
+}
+
+func TestEventWithoutFullDocumentIsSkippedBeforeShardKeyLookup(t *testing.T) {
+	for _, op := range []string{"update", "replace"} {
+		update, err := eventWithKey(t, op, nil, bson.D{{Key: "_id", Value: "doc1"}}, []string{"tenant"})
+
+		require.NoError(t, err, op)
+		require.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE, update.GetType(), op)
+		require.Empty(t, update.GetData(), op)
+		require.Equal(t, []string{"_id"}, idNames(update), op)
 	}
 }
 
@@ -125,12 +134,10 @@ func TestShardKeyFieldMissingFromFullDocumentComesFromDocumentKey(t *testing.T) 
 }
 
 func TestShardKeyFieldMissingEverywhereFailsNamingTheField(t *testing.T) {
-	for _, doc := range []bson.D{nil, {{Key: "_id", Value: "doc1"}}} {
-		update, err := eventWithKey(t, "update", doc, bson.D{{Key: "_id", Value: "doc1"}}, []string{"tenant"})
+	update, err := eventWithKey(t, "update", bson.D{{Key: "_id", Value: "doc1"}}, bson.D{{Key: "_id", Value: "doc1"}}, []string{"tenant"})
 
-		require.ErrorContains(t, err, "tenant")
-		require.Nil(t, update)
-	}
+	require.ErrorContains(t, err, "tenant")
+	require.Nil(t, update)
 }
 
 func TestShardKeyEqualToIdYieldsNoExtraPart(t *testing.T) {
@@ -263,7 +270,7 @@ func TestShardKeyPartIsIdenticalFromFullDocumentAndFromDocumentKey(t *testing.T)
 			fromDoc, err := eventWithKey(t, "update", bson.D{{Key: "_id", Value: "doc1"}, {Key: "tenant", Value: value}}, idOnly, []string{"tenant"})
 			require.NoError(t, err)
 
-			fromKey, err := eventWithKey(t, "update", nil, withKey, []string{"tenant"})
+			fromKey, err := eventWithKey(t, "delete", nil, withKey, []string{"tenant"})
 
 			require.NoError(t, err)
 			require.Equal(t, fromDoc.GetId()[1].GetType(), fromKey.GetId()[1].GetType())

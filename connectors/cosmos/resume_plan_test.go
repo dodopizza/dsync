@@ -22,13 +22,13 @@ import (
 
 func resumePlanningResponses(deleteResponse bson.D) []bson.D {
 	return []bson.D{
+		{{Key: "ok", Value: 1}, {Key: "shardKeyDefinition", Value: bson.D{{Key: "partitionKey", Value: "Hash"}}}},
 		{{Key: "ok", Value: 1}, {Key: "cursor", Value: bson.D{
 			{Key: "id", Value: int64(0)}, {Key: "ns", Value: "db.col"},
 			{Key: "firstBatch", Value: bson.A{bson.D{
 				{Key: "_id", Value: bson.D{{Key: "_data", Value: bson.Binary{Data: []byte(`{"Rid":"collection"}`)}}}},
 			}}},
 		}}},
-		{{Key: "ok", Value: 1}, {Key: "shardKeyDefinition", Value: bson.D{{Key: "partitionKey", Value: "Hash"}}}},
 		{{Key: "ok", Value: 1}, {Key: "n", Value: 1}}, // dummy insert
 		deleteResponse,
 	}
@@ -47,9 +47,9 @@ func resumePlanningClient(t *testing.T, responses ...bson.D) *mongo.Client {
 func TestLatestResumeTokenReportsCleanupFailureWithValidToken(t *testing.T) {
 	client := resumePlanningClient(t, resumePlanningResponses(bson.D{
 		{Key: "ok", Value: 0}, {Key: "code", Value: 13}, {Key: "errmsg", Value: "dummy deletion denied"},
-	})...)
+	})[1:]...)
 
-	token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false)
+	token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false, []string{"partitionKey"})
 	require.NotEmpty(t, token, "the token was obtained before cleanup failed")
 	require.ErrorIs(t, err, errDummyRecordCleanup)
 	require.ErrorContains(t, err, "dummy deletion denied")

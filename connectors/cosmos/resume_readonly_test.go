@@ -24,8 +24,8 @@ var (
 	readFailedReply     = bson.D{{Key: "ok", Value: 0}, {Key: "code", Value: 2}, {Key: "errmsg", Value: "cursor read rejected"}}
 	cursorKilledReply   = bson.D{{Key: "ok", Value: 1}, {Key: "cursorsKilled", Value: bson.A{int64(7)}}, {Key: "cursorsNotFound", Value: bson.A{}}, {Key: "cursorsAlive", Value: bson.A{}}, {Key: "cursorsUnknown", Value: bson.A{}}}
 
-	deniedThenClosed = []string{"aggregate", "customAction", "insert", "killCursors"}
-	deniedThenRead   = []string{"aggregate", "customAction", "insert", "getMore", "killCursors"}
+	deniedThenClosed = []string{"aggregate", "insert", "killCursors"}
+	deniedThenRead   = []string{"aggregate", "insert", "getMore", "killCursors"}
 )
 
 // The cursor stays open (non-zero id), as a live change stream does.
@@ -59,17 +59,17 @@ func TestLatestResumeTokenWithReadOnlyKeyComesFromOpenCursor(t *testing.T) {
 		commands  []string
 	}{
 		"token arrives with the empty first batch": {
-			responses: []bson.D{cursorReply("firstBatch", bson.A{}, cursorToken), collectionInfoReply, insertDeniedReply, cursorKilledReply},
+			responses: []bson.D{cursorReply("firstBatch", bson.A{}, cursorToken), insertDeniedReply, cursorKilledReply},
 			want:      cursorToken,
 			commands:  deniedThenClosed,
 		},
 		"token arrives with the next empty batch": {
-			responses: []bson.D{cursorReply("firstBatch", bson.A{}, nil), collectionInfoReply, insertDeniedReply, cursorReply("nextBatch", bson.A{}, cursorToken), cursorKilledReply},
+			responses: []bson.D{cursorReply("firstBatch", bson.A{}, nil), insertDeniedReply, cursorReply("nextBatch", bson.A{}, cursorToken), cursorKilledReply},
 			want:      cursorToken,
 			commands:  deniedThenRead,
 		},
 		"an event arrives before any token": {
-			responses: []bson.D{cursorReply("firstBatch", bson.A{}, nil), collectionInfoReply, insertDeniedReply, cursorReply("nextBatch", bson.A{bson.D{{Key: "_id", Value: eventToken}}}, nil), cursorKilledReply},
+			responses: []bson.D{cursorReply("firstBatch", bson.A{}, nil), insertDeniedReply, cursorReply("nextBatch", bson.A{bson.D{{Key: "_id", Value: eventToken}}}, nil), cursorKilledReply},
 			want:      eventToken,
 			commands:  deniedThenRead,
 		},
@@ -77,7 +77,7 @@ func TestLatestResumeTokenWithReadOnlyKeyComesFromOpenCursor(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			client, commands := recordingClient(t, test.responses...)
 
-			token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false)
+			token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false, []string{"partitionKey"})
 
 			require.NoError(t, err)
 			require.Equal(t, mustMarshalBSON(t, test.want), token)
@@ -92,9 +92,9 @@ func TestLatestResumeTokenWithReadOnlyKeyAndNoCursorTokenFails(t *testing.T) {
 		"reading the cursor fails": readFailedReply,
 	} {
 		t.Run(name, func(t *testing.T) {
-			client, commands := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), collectionInfoReply, insertDeniedReply, read, cursorKilledReply)
+			client, commands := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), insertDeniedReply, read, cursorKilledReply)
 
-			token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false)
+			token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false, []string{"partitionKey"})
 
 			require.ErrorContains(t, err, "read-only")
 			require.Nil(t, token)
@@ -104,17 +104,17 @@ func TestLatestResumeTokenWithReadOnlyKeyAndNoCursorTokenFails(t *testing.T) {
 }
 
 func TestLatestResumeTokenWithWritableKeyStillUsesDummyRecord(t *testing.T) {
-	client, commands := recordingClient(t, resumePlanningResponses(bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: 1}})...)
+	client, commands := recordingClient(t, resumePlanningResponses(bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: 1}})[1:]...)
 
-	token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false)
+	token, err := getLatestResumeToken(context.Background(), client, iface.Location{Database: "db", Collection: "col"}, false, []string{"partitionKey"})
 
 	require.NoError(t, err)
 	require.Equal(t, mustMarshalBSON(t, bson.D{{Key: "_data", Value: bson.Binary{Data: []byte(`{"Rid":"collection"}`)}}}), token)
-	require.Equal(t, []string{"aggregate", "customAction", "insert", "delete"}, *commands)
+	require.Equal(t, []string{"aggregate", "insert", "delete"}, *commands)
 }
 
 func TestGeneratePlanWithReadOnlyKeyResumesAfterCursorToken(t *testing.T) {
-	client, _ := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), collectionInfoReply, insertDeniedReply, cursorReply("nextBatch", bson.A{}, cursorToken), cursorKilledReply)
+	client, _ := recordingClient(t, collectionInfoReply, cursorReply("firstBatch", bson.A{}, nil), insertDeniedReply, cursorReply("nextBatch", bson.A{}, cursorToken), cursorKilledReply)
 	connector := &conn{client: client, connectorSettings: ConnectorSettings{MaxNumNamespaces: 1}}
 
 	plan, err := connector.GeneratePlan(context.Background(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
@@ -140,7 +140,7 @@ func TestGeneratePlanWithReadOnlyKeyResumesAfterCursorToken(t *testing.T) {
 }
 
 func TestGeneratePlanWithReadOnlyKeyAndNoCursorTokenFailsNamingNamespace(t *testing.T) {
-	client, _ := recordingClient(t, cursorReply("firstBatch", bson.A{}, nil), collectionInfoReply, insertDeniedReply, cursorReply("nextBatch", bson.A{}, nil), cursorKilledReply)
+	client, _ := recordingClient(t, collectionInfoReply, cursorReply("firstBatch", bson.A{}, nil), insertDeniedReply, cursorReply("nextBatch", bson.A{}, nil), cursorKilledReply)
 	connector := &conn{client: client, connectorSettings: ConnectorSettings{MaxNumNamespaces: 1}}
 
 	plan, err := connector.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
@@ -150,4 +150,16 @@ func TestGeneratePlanWithReadOnlyKeyAndNoCursorTokenFailsNamingNamespace(t *test
 	require.Nil(t, plan)
 	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
 	require.ErrorContains(t, err, "db.col")
+}
+
+func TestGeneratePlanWithFullDocumentKeyReadsTheShardKeyOnce(t *testing.T) {
+	client, commands := recordingClient(t, resumePlanningResponses(bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: 1}})...)
+	connector := &conn{client: client, connectorSettings: ConnectorSettings{MaxNumNamespaces: 1, FullDocumentKey: true}}
+
+	_, err := connector.GeneratePlan(t.Context(), connect.NewRequest(&adiomv1.GeneratePlanRequest{
+		Namespaces: []string{"db.col"}, Updates: true,
+	}))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"customAction", "aggregate", "insert", "delete"}, *commands)
 }

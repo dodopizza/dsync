@@ -53,7 +53,7 @@ func generateConnectorID(connectionString string) iface.ConnectorID {
 	return iface.ConnectorID(strconv.FormatUint(id, 16))
 }
 
-func getLatestResumeToken(ctx context.Context, client *mongo.Client, location iface.Location, withDelete bool) (resumeToken bson.Raw, retErr error) {
+func getLatestResumeToken(ctx context.Context, client *mongo.Client, location iface.Location, withDelete bool, shardKeyFields []string) (resumeToken bson.Raw, retErr error) {
 	slog.Debug(fmt.Sprintf("Getting latest resume token for location: %v\n", location))
 	opts := moptions.ChangeStream().SetFullDocument(moptions.UpdateLookup)
 	changeStream, err := createChangeStream(ctx, client, location, opts, withDelete)
@@ -65,10 +65,6 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 	// we need ANY event to get the resume token that we can use to extract the cluster time
 	col := client.Database(location.Database).Collection(location.Collection)
 
-	shardKeyFields, err := fetchShardKeyFields(ctx, client, location)
-	if err != nil {
-		return nil, err
-	}
 	dummyInsertFilter := makeDummyDocument(shardKeyFields)
 	slog.Debug("Dummy Insert", "filter", dummyInsertFilter)
 

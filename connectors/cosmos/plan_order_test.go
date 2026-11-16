@@ -40,7 +40,7 @@ func TestGeneratePlanTakesResumeTokenBeforePartitioning(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, plan.Msg.GetPartitions(), 1)
-	require.Equal(t, []string{"aggregate", "customAction", "insert", "delete", "count"}, *commands)
+	require.Equal(t, []string{"customAction", "aggregate", "insert", "delete", "count"}, *commands)
 }
 
 func TestGeneratePlanTokenFailureStopsBeforePartitioning(t *testing.T) {

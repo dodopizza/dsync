@@ -46,7 +46,7 @@ func TestSplitRangeObjectIdBoundariesStrictlyIncreasingWithinOneSecond(t *testin
 func TestSplitRangeObjectIdWithEqualBoundsStaysASingleRange(t *testing.T) {
 	bound := objectIDValue(1000, 0)
 
-	boundaries, err := splitRange(bound, bound, 5)
+	boundaries, err := splitRangeObjectId(bound, bound, 5)
 
 	require.NoError(t, err)
 	require.Equal(t, []bson.RawValue{bound, bound}, boundaries)

@@ -182,6 +182,7 @@ func TestSampledBoundsFallBackWithoutUsableSamples(t *testing.T) {
 func TestPartitionBoundsFallBackForUnsupportedAndMixedTypes(t *testing.T) {
 	for name, tc := range map[string]struct{ min, max bson.RawValue }{
 		"mixed int and string": {rawOf(t, int32(1)), rawOf(t, "z")},
+		"objectid and string":  {objectIDValue(100, 0), rawOf(t, "z")},
 		"int32 and int64":      {rawOf(t, int32(1)), rawOf(t, int64(9))},
 		"double":               {rawOf(t, 1.5), rawOf(t, 9.5)},
 		"decimal128":           {rawOf(t, bson.NewDecimal128(0, 1)), rawOf(t, bson.NewDecimal128(0, 9))},
@@ -205,7 +206,7 @@ func TestPartitionBoundsKeepsTheObjectIdPathWithoutSampling(t *testing.T) {
 	bounds, err := partitionBounds(t.Context(), low, high, 4, sampler.sample)
 
 	require.NoError(t, err)
-	want, err := splitRange(low, high, 4)
+	want, err := splitRangeObjectId(low, high, 4)
 	require.NoError(t, err)
 	require.Len(t, bounds, len(want))
 	for i := range want {
@@ -319,4 +320,15 @@ func TestSampledBoundsOrderAgainstExplicitExpectations(t *testing.T) {
 			require.Equal(t, tc.want, bounds)
 		})
 	}
+}
+
+func TestSampledBoundsCapTheSampleSize(t *testing.T) {
+	sampler := &fakeSampler{ids: stringIDs(t, 0, 10000)}
+
+	bounds, err := partitionBounds(t.Context(), rawOf(t, "k"), rawOf(t, "l"), 5000, sampler.sample)
+
+	require.NoError(t, err)
+	require.Equal(t, []int64{10000}, sampler.sizes)
+	require.Len(t, bounds, 5001)
+	requireStrictlyIncreasing(t, bounds)
 }

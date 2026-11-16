@@ -75,7 +75,6 @@ func (cc *planner) createReadPlanTaskForNs(ns iface.Namespace) iface.ReadPlanTas
 	return task
 }
 
-// In parallel checks the count of the namespace and sends the resulting tasks to the final channel, closing it when done
 func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.Namespace, finalTasksChannel chan<- iface.ReadPlanTask) {
 	//define workgroup
 	wg := sync.WaitGroup{}
@@ -116,7 +115,6 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 						continue
 					}
 					slog.Debug(fmt.Sprintf("Min and max boundaries for task %v: %v, %v", nsTask, min, max))
-					// find split points
 					numParts := int(count / cc.settings.TargetDocCountPerPartition)
 					splitBounds, err := partitionBounds(cc.Ctx, min, max, numParts, cc.idSampler(nsTask))
 					if err != nil {
@@ -142,7 +140,6 @@ func (cc *planner) parallelNamespaceTaskPreparer(countCheckChannel <-chan iface.
 					finalTasksChannel <- minTask
 					finalTasksChannel <- maxTask
 
-					//send the tasks between the split points
 					for i := range len(splitBounds) - 1 {
 						task := cc.createReadPlanTaskForNs(nsTask)
 						task.Def.PartitionKey = cc.settings.partitionKey

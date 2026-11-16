@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -139,10 +140,11 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 
 	tokenMap := NewTokenMap()
 	if r.Msg.GetUpdates() {
-		if _, err := streamShardKeyFields(ctx, c.client, nsTasks, c.connectorSettings); err != nil {
+		shardKeyFields, err := streamShardKeyFields(ctx, c.client, nsTasks, c.connectorSettings)
+		if err != nil {
 			return nil, shardKeyCheckError(err)
 		}
-		tokenMap, err = c.collectResumeTokens(ctx, nsTasks)
+		tokenMap, err = c.collectResumeTokens(ctx, nsTasks, shardKeyFields)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
@@ -199,14 +201,22 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 	}), nil
 }
 
-func (c *conn) collectResumeTokens(ctx context.Context, nsTasks []iface.Namespace) (*TokenMap, error) {
+func (c *conn) collectResumeTokens(ctx context.Context, nsTasks []iface.Namespace, shardKeyFields map[iface.Namespace][]string) (*TokenMap, error) {
 	tokenMap := NewTokenMap()
 	wg := sync.WaitGroup{}
 	tokenErrs := make([]error, len(nsTasks))
 	for i, ns := range nsTasks {
 		wg.Go(func() {
 			loc := iface.Location{Database: ns.Db, Collection: ns.Col}
-			resumeToken, err := getLatestResumeToken(ctx, c.client, loc, c.connectorSettings.WithDelete)
+			fields, ok := shardKeyFields[ns]
+			if !ok {
+				var err error
+				if fields, err = fetchShardKeyFields(ctx, c.client, loc); err != nil {
+					tokenErrs[i] = fmt.Errorf("resume token for %s.%s: %w", ns.Db, ns.Col, err)
+					return
+				}
+			}
+			resumeToken, err := getLatestResumeToken(ctx, c.client, loc, c.connectorSettings.WithDelete, fields)
 			if err != nil {
 				tokenErrs[i] = fmt.Errorf("resume token for %s.%s: %w", ns.Db, ns.Col, err)
 				return
@@ -345,46 +355,36 @@ func updateFromEvent(decode func(any) error, shardKeyFields []string) (*adiomv1.
 	return update, nil
 }
 
-func deleteUpdate(id any) (*adiomv1.Update, error) {
-	idType, idVal, err := bson.MarshalValue(id)
+func marshalIDPart(name string, value any) (*adiomv1.BsonValue, error) {
+	valueType, data, err := bson.MarshalValue(value)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal _id: %w", err)
+		return nil, fmt.Errorf("failed to marshal %v: %w", name, err)
 	}
-	return &adiomv1.Update{
-		Id: []*adiomv1.BsonValue{{
-			Data: idVal,
-			Type: uint32(idType),
-			Name: "_id",
-		}},
-		Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE,
-	}, nil
+	return &adiomv1.BsonValue{Data: data, Type: uint32(valueType), Name: name}, nil
+}
+
+func deleteUpdate(id any) (*adiomv1.Update, error) {
+	idPart, err := marshalIDPart("_id", id)
+	if err != nil {
+		return nil, err
+	}
+	return &adiomv1.Update{Id: []*adiomv1.BsonValue{idPart}, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE}, nil
 }
 
 func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate, shardKeyFields []string) (*adiomv1.Update, error) {
-	//slog.Debug(fmt.Sprintf("Converting change stream event %v", change))
-
-	// get the id of the document that was changed
-	var idType bson.Type
-	var idVal []byte
-	for _, k := range change.DocumentKey {
-		if k.Key == "_id" {
-			var err error
-			idType, idVal, err = bson.MarshalValue(k.Value)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal _id: %v", err)
-			}
-			break
-		}
-	}
-	if idVal == nil {
+	idIndex := slices.IndexFunc(change.DocumentKey, func(e bson.E) bool { return e.Key == "_id" })
+	if idIndex < 0 || change.DocumentKey[idIndex].Value == nil {
 		return nil, fmt.Errorf("_id not found in documentKey")
 	}
+	idPart, err := marshalIDPart("_id", change.DocumentKey[idIndex].Value)
+	if err != nil {
+		return nil, err
+	}
+	id := []*adiomv1.BsonValue{idPart}
 
-	id := []*adiomv1.BsonValue{{
-		Data: idVal,
-		Type: uint32(idType),
-		Name: "_id",
-	}}
+	if change.OperationType != "delete" && len(change.FullDocument) == 0 {
+		return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE}, nil
+	}
 	shardKeyParts, err := shardKeyIdParts(change, shardKeyFields)
 	if err != nil {
 		return nil, err
@@ -394,17 +394,7 @@ func convertChangeStreamEventToUpdate(change mongoconn.MongoUpdate, shardKeyFiel
 	if change.OperationType == "delete" {
 		return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_DELETE}, nil
 	}
-
-	// get the full state of the document after the change
-	update := &adiomv1.Update{
-		Id:   id,
-		Type: adiomv1.UpdateType_UPDATE_TYPE_UPDATE,
-		Data: change.FullDocument,
-	}
-	if len(change.FullDocument) == 0 {
-		update.Type = adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE
-	}
-	return update, nil
+	return &adiomv1.Update{Id: id, Type: adiomv1.UpdateType_UPDATE_TYPE_UPDATE, Data: change.FullDocument}, nil
 }
 
 func shardKeyIdParts(change mongoconn.MongoUpdate, shardKeyFields []string) ([]*adiomv1.BsonValue, error) {
@@ -432,11 +422,11 @@ func shardKeyIdPart(change mongoconn.MongoUpdate, field string) (*adiomv1.BsonVa
 		if k.Value == nil {
 			return &adiomv1.BsonValue{Type: uint32(bson.TypeNull), Name: field}, nil
 		}
-		valueType, data, err := bson.MarshalValue(k.Value)
+		part, err := marshalIDPart(field, k.Value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal shard key field %v: %w", field, err)
+			return nil, fmt.Errorf("shard key field %v: %w", field, err)
 		}
-		return &adiomv1.BsonValue{Data: data, Type: uint32(valueType), Name: field}, nil
+		return part, nil
 	}
 	return nil, fmt.Errorf("shard key field %v is in neither fullDocument nor documentKey", field)
 }

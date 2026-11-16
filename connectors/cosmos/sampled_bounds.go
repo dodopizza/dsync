@@ -13,13 +13,19 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-const samplesPerPartition = 10
+const (
+	samplesPerPartition = 10
+	maxIDSamples        = 10000
+)
 
 type idSampler func(ctx context.Context, size int64) ([]bson.RawValue, error)
 
 func partitionBounds(ctx context.Context, min, max bson.RawValue, numParts int, sample idSampler) ([]bson.RawValue, error) {
 	if min.Type == bson.TypeObjectID {
-		return splitRange(min, max, numParts)
+		if max.Type != bson.TypeObjectID {
+			return nil, fmt.Errorf("cannot partition range between ids of kind %s and %s", idKind(min), idKind(max))
+		}
+		return splitRangeObjectId(min, max, numParts)
 	}
 	return sampledBounds(ctx, min, max, numParts, sample)
 }
@@ -28,7 +34,11 @@ func sampledBounds(ctx context.Context, min, max bson.RawValue, numParts int, sa
 	if !sameIDKind(min, max) {
 		return nil, fmt.Errorf("cannot sample a range between ids of kind %s and %s", idKind(min), idKind(max))
 	}
-	samples, err := sample(ctx, int64(numParts*samplesPerPartition))
+	size := numParts * samplesPerPartition
+	if size > maxIDSamples {
+		size = maxIDSamples
+	}
+	samples, err := sample(ctx, int64(size))
 	if err != nil {
 		return nil, fmt.Errorf("failed to sample ids: %w", err)
 	}
@@ -44,8 +54,12 @@ func sampledBounds(ctx context.Context, min, max bson.RawValue, numParts int, sa
 	slices.SortFunc(inner, compareIDs)
 	inner = slices.CompactFunc(inner, func(a, b bson.RawValue) bool { return compareIDs(a, b) == 0 })
 
+	step := size / numParts
+	if step < 1 {
+		step = 1
+	}
 	bounds := []bson.RawValue{min}
-	for i := samplesPerPartition - 1; i < len(inner) && len(bounds) < numParts; i += samplesPerPartition {
+	for i := step - 1; i < len(inner) && len(bounds) < numParts; i += step {
 		bounds = append(bounds, inner[i])
 	}
 	if len(bounds) == 1 {

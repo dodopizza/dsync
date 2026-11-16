@@ -84,7 +84,9 @@ func TestCosmosLivePartitionedResume(t *testing.T) {
 	}
 
 	location := iface.Location{Database: databaseName, Collection: collectionName}
-	token, err := getLatestResumeToken(ctx, source.client, location, false)
+	shardKeyFields, err := fetchShardKeyFields(ctx, source.client, location)
+	require.NoError(t, err)
+	token, err := getLatestResumeToken(ctx, source.client, location, false, shardKeyFields)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
 	count, err := collection.CountDocuments(ctx, bson.D{})
