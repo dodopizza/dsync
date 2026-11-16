@@ -147,11 +147,9 @@ func TestDocumentModeParallelFirstWritesLoadTheShapeSafely(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			assert.NoError(t, writeDocs(ctx, c, ns, rawDoc(t, bson.D{{Key: "_id", Value: int32(i)}, {Key: "Region", Value: "eu"}})))
-		}()
+		})
 	}
 	wg.Wait()
 

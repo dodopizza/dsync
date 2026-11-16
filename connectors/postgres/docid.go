@@ -1,11 +1,14 @@
 package postgres
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"uuid"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/x/bsonx/bsoncore"
@@ -247,28 +250,21 @@ func decodeStructured(tag, rest string) (bson.RawValue, error) {
 }
 
 func uuidText(b []byte) string {
-	h := hex.EncodeToString(b)
-	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+	return uuid.UUID(b).String()
 }
 
 func parseUUIDText(s string) ([]byte, bool) {
-	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+	u, err := uuid.Parse(s)
+	if len(s) != 36 || err != nil {
 		return nil, false
 	}
-	compact := s[0:8] + s[9:13] + s[14:18] + s[19:23] + s[24:36]
-	data, err := hex.DecodeString(compact)
-	if err != nil {
-		return nil, false
-	}
-	return data, true
+	return u[:], true
 }
 
 func swapLegacyUUID(b []byte) []byte {
-	out := append([]byte(nil), b...)
-	for _, span := range [][2]int{{0, 4}, {4, 6}, {6, 8}} {
-		for i, j := span[0], span[1]-1; i < j; i, j = i+1, j-1 {
-			out[i], out[j] = out[j], out[i]
-		}
-	}
+	out := bytes.Clone(b)
+	slices.Reverse(out[0:4])
+	slices.Reverse(out[4:6])
+	slices.Reverse(out[6:8])
 	return out
 }

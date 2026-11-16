@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -97,7 +96,7 @@ func TestShapeDocTableRejectsBadShapesNamingTableAndColumn(t *testing.T) {
 func TestLoadDocTableRejectsNonTwoPartNamespacesBeforeQuerying(t *testing.T) {
 	for _, namespace := range []string{"items", "x.schema.items", "", ".items", "schema.", "a.b.c.d"} {
 		t.Run(namespace, func(t *testing.T) {
-			_, err := loadDocTable(context.Background(), nil, namespace)
+			_, err := loadDocTable(t.Context(), nil, namespace)
 
 			require.Error(t, err)
 			assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))

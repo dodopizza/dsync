@@ -252,16 +252,14 @@ func TestDocStateLoadsOncePerNamespaceUnderParallelFirstWritesAndDoesNotCacheFai
 	plan := &docPlan{query: "q"}
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got, err := state.get("app.items", func() (*docPlan, error) {
 				loads.Add(1)
 				return plan, nil
 			})
 			assert.NoError(t, err)
 			assert.Same(t, plan, got)
-		}()
+		})
 	}
 	wg.Wait()
 	assert.EqualValues(t, 1, loads.Load())
