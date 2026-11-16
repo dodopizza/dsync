@@ -39,6 +39,7 @@ type ConnectorSettings struct {
 	EmulateDeletes         bool // if true, we will generate delete events
 	DeletesCheckInterval   time.Duration
 	WitnessMongoConnString string
+	Witness                Witness
 }
 
 func setDefault[T comparable](field *T, defaultValue T) {
@@ -717,6 +718,21 @@ func (c *conn) Teardown() {
 	}
 }
 
+func selectWitness(settings ConnectorSettings) Witness {
+	if settings.Witness != nil {
+		return settings.Witness
+	}
+	if !settings.EmulateDeletes {
+		return nil
+	}
+	clientOptions := moptions.Client().ApplyURI(settings.WitnessMongoConnString).SetConnectTimeout(settings.ServerConnectTimeout)
+	client, err := mongo.Connect(clientOptions)
+	if err != nil {
+		panic(mongoconn.InvalidClientOptionsError(clientOptions))
+	}
+	return mongoWitness{client: client}
+}
+
 func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler {
 	setDefault(&settings.ServerConnectTimeout, 15*time.Second)
 	setDefault(&settings.PingTimeout, 10*time.Second)
@@ -728,16 +744,7 @@ func NewConn(settings ConnectorSettings) adiomv1connect.ConnectorServiceHandler 
 	settings.partitionKey = "_id"
 	settings.CosmosSink = true
 
-	var witness Witness
-	// Connect to the witness MongoDB instance
-	if settings.EmulateDeletes {
-		clientOptions := moptions.Client().ApplyURI(settings.WitnessMongoConnString).SetConnectTimeout(settings.ServerConnectTimeout)
-		client, err := mongo.Connect(clientOptions)
-		if err != nil {
-			panic(mongoconn.InvalidClientOptionsError(clientOptions))
-		}
-		witness = mongoWitness{client: client}
-	}
+	witness := selectWitness(settings)
 
 	client, err := mongoconn.MongoClient(context.Background(), settings.ConnectorSettings)
 	if err != nil {
