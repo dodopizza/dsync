@@ -173,6 +173,10 @@ type blockedWrite struct {
 }
 
 func (f *writeFixture) holdRow(ctx context.Context, t *testing.T, id int32) *holder {
+	return f.holdStatement(ctx, t, fmt.Sprintf("UPDATE %s SET v = 'held' WHERE id = %d", f.table, id))
+}
+
+func (f *writeFixture) holdStatement(ctx context.Context, t *testing.T, stmt string) *holder {
 	holderConn := adminConn(ctx, t)
 	tx, err := holderConn.Begin(ctx)
 	must(t, err, "begin")
@@ -184,8 +188,8 @@ func (f *writeFixture) holdRow(ctx context.Context, t *testing.T, id int32) *hol
 	h := &holder{f: f, tx: tx, monitor: adminConn(ctx, t)}
 	must(t, tx.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&h.pid), "holder pid")
 	h.known = []int32{h.pid}
-	_, err = tx.Exec(ctx, fmt.Sprintf("UPDATE %s SET v = 'held' WHERE id = $1", f.table), id)
-	must(t, err, "hold row")
+	_, err = tx.Exec(ctx, stmt)
+	must(t, err, "hold lock")
 	return h
 }
 

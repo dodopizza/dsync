@@ -128,6 +128,10 @@ func decodeTextColumnData(mi *pgtype.Map, data []byte, dataType uint32) (interfa
 	return string(data), nil
 }
 
+func errorResponseError(errMsg *pgproto3.ErrorResponse) error {
+	return fmt.Errorf("error in pg msg: %w", pgconn.ErrorResponseToPgError(errMsg))
+}
+
 func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 	standbyMessageTimeout := time.Second * 10
 	minFlushDelay := c.MinFlushDelay
@@ -202,7 +206,7 @@ func (c *ChangeStream) Run(ctx context.Context, ch chan<- []Update) error {
 			return err
 		}
 		if errMsg, ok := rawMsg.(*pgproto3.ErrorResponse); ok {
-			return fmt.Errorf("error in pg msg: %v", errMsg)
+			return errorResponseError(errMsg)
 		}
 		msg, ok := rawMsg.(*pgproto3.CopyData)
 		if !ok {

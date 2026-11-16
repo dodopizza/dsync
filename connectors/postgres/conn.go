@@ -234,11 +234,11 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 			sampleQuery := fmt.Sprintf("SELECT %v FROM %v TABLESAMPLE BERNOULLI (%v) ORDER BY %v", primaryKeysPartial, sanitizedNamespace, percentage, primaryKeysPartial)
 			rows, err := c.c.Query(ctx, sampleQuery)
 			if err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 			ms, err := pgx.CollectRows(rows, pgx.RowToMap)
 			if err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 			for _, m := range ms {
 				getPrimaryKey(keys, m)
@@ -279,26 +279,26 @@ func (c *conn) GeneratePlan(ctx context.Context, r *connect.Request[adiomv1.Gene
 
 		if c.settings.Force {
 			if _, err := c.c.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %v", sanitizedPublication)); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 
 			createPublicationQ := fmt.Sprintf("CREATE PUBLICATION %v FOR TABLE %v;", sanitizedPublication, strings.Join(sanitizedNamespaces, ", "))
 			if _, err := c.c.Exec(ctx, createPublicationQ); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 
 			var count int
 			if err := c.c.QueryRow(ctx, "SELECT COUNT(*) from pg_replication_slots WHERE slot_name=$1", c.settings.SlotName).Scan(&count); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 			if count > 0 {
 				if _, err := c.c.Exec(ctx, "SELECT pg_drop_replication_slot($1)", c.settings.SlotName); err != nil {
-					return nil, connect.NewError(connect.CodeInternal, err)
+					return nil, toConnectError(err)
 				}
 			}
 
 			if _, err := c.c.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", c.settings.SlotName); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, toConnectError(err)
 			}
 		}
 
@@ -346,13 +346,13 @@ func (c *conn) GetNamespaceMetadata(ctx context.Context, r *connect.Request[adio
 	sanitizedNamespace := SanitizeNamespace(r.Msg.GetNamespace())
 	var count int64
 	if err := c.c.QueryRow(ctx, "SELECT reltuples::bigint AS estimate FROM pg_class WHERE oid = $1::regclass", r.Msg.GetNamespace()).Scan(&count); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, toConnectError(err)
 	}
 	if count < c.settings.EstimatedCountThreshold {
 		row := c.c.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %v", sanitizedNamespace))
 		err := row.Scan(&count)
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, toConnectError(err)
 		}
 	}
 
@@ -419,11 +419,11 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 	q := fmt.Sprintf("SELECT * from %v%v%v ORDER BY %v LIMIT %v", SanitizeNamespace(namespace), where, strings.Join(whereQueries, " AND "), primaryKeysPartial, limit+1)
 	rows, err := c.c.Query(ctx, q, args...)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, toConnectError(err)
 	}
 	ms, err := pgx.CollectRows(rows, pgx.RowToMap)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, toConnectError(err)
 	}
 
 	var data [][]byte
@@ -556,7 +556,7 @@ func (c *conn) toBsonAdiomUpdate(update pglib.Update) (*adiomv1.Update, error) {
 func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.StreamUpdatesRequest], res *connect.ServerStream[adiomv1.StreamUpdatesResponse]) error {
 	pgConn, err := pgconn.Connect(ctx, c.replicationUrl)
 	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+		return toConnectError(err)
 	}
 	defer pgConn.Close(ctx)
 
@@ -581,7 +581,10 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 	ch := make(chan []pglib.Update, 10)
 	eg.Go(func() error {
 		defer close(ch)
-		return cs.Run(ctx, ch)
+		if err := cs.Run(ctx, ch); err != nil {
+			return classifyStreamError(err)
+		}
+		return nil
 	})
 
 	eg.Go(func() error {
@@ -715,7 +718,7 @@ func (c *conn) execBatch(ctx context.Context, batch *pgx.Batch, onFail func(i in
 	}
 	if err := br.Close(); err != nil {
 		if !errors.Is(err, context.Canceled) {
-			slog.Error(fmt.Sprintf("Failed to commit batch: %v", err))
+			slog.Error(fmt.Sprintf("Failed to complete batch: %v", err))
 		}
 		return toConnectError(err)
 	}
@@ -969,6 +972,15 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 	}
 
 	return connect.NewResponse(&adiomv1.WriteUpdatesResponse{}), nil
+}
+
+const sqlStateObjectInUse = "55006"
+
+func classifyStreamError(err error) error {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlStateObjectInUse {
+		return connect.NewError(connect.CodeUnavailable, err)
+	}
+	return toConnectError(err)
 }
 
 func createReplicationUrl(urlString string) (string, error) {
