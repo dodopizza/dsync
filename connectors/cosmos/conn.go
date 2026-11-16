@@ -293,7 +293,7 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 		namespaces = append(namespaces, ns)
 	}
 
-	var sendMutex sync.Mutex
+	sender := &cursorSender{mu: &sync.Mutex{}}
 	var wg sync.WaitGroup
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -331,23 +331,12 @@ func (c *conn) StreamLSN(ctx context.Context, r *connect.Request[adiomv1.StreamL
 				lsnTracker.IncrementLSN(ns)
 
 				if changeStream.RemainingBatchLength() == 0 {
-					tokenMap.AddToken(loc, changeStream.ResumeToken())
-					encodedToken, err := tokenMap.encodeMap()
-					if err != nil {
-						reportError(fmt.Errorf("failed to encode LSN token map: %w", err))
-						return
-					}
-					nextCursor, err := encodeResumeToken(readPlanStartAt, encodedToken)
-					if err != nil {
-						reportError(fmt.Errorf("failed to encode LSN cursor: %w", err))
-						return
-					}
-					sendMutex.Lock()
-					err = s.Send(&adiomv1.StreamLSNResponse{
-						Lsn:        uint64(lsnTracker.GetGlobalLSN()) + c.deletesCount.Load(),
-						NextCursor: nextCursor,
+					err := sendWithCursor(sender, tokenMap, readPlanStartAt, loc, changeStream.ResumeToken(), func(cursor []byte) error {
+						return s.Send(&adiomv1.StreamLSNResponse{
+							Lsn:        uint64(lsnTracker.GetGlobalLSN()) + c.deletesCount.Load(),
+							NextCursor: cursor,
+						})
 					})
-					sendMutex.Unlock()
 					if err != nil {
 						reportError(fmt.Errorf("failed to send LSN update: %w", err))
 						return

@@ -95,8 +95,8 @@ Limits:
 ### Replay after restart
 
 After a restart the transfer resumes from the last checkpoint, so writes made after it are applied again.
-* Column mode rewrites every non-key column on each applied write, so a column omitted from a message gets its default again. Sequence or time defaults produce a new value on each replay.
-* Document mode sets the `--updated-at-column` value to the replay time for older document versions inside the replayed window, unless `--updated-at-field` is set.
+* Column mode rewrites every writable non-key column on each applied write; identity and generated columns keep their value. A column omitted from a message gets its default again, or NULL when it is nullable and has no default. Sequence or time defaults produce a new value on each replay.
+* Document mode without `--updated-at-field` leaves the `--updated-at-column` value at the replay time whenever the replayed window holds more than one version of a document, the newest included. With `--updated-at-field`, the value comes from the document only when that field holds a non-null date.
 * A value moved from one row to another under a secondary UNIQUE constraint inside the replayed window can fail the replay with SQLSTATE 23505.
 
 # Quickstart

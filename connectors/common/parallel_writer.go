@@ -106,7 +106,7 @@ func (bwa *ParallelWriter) StopAndWait() error {
 	return err
 }
 
-func hashDataMsgId(dataMsg iface.DataMessage) int {
+func hashDataMsgId(dataMsg iface.DataMessage) uint32 {
 	parts := dataMsg.Id
 	if i := slices.IndexFunc(parts, func(d *adiomv1.BsonValue) bool { return d.GetName() == "_id" }); i >= 0 {
 		parts = parts[i : i+1]
@@ -115,7 +115,7 @@ func hashDataMsgId(dataMsg iface.DataMessage) int {
 	for _, d := range parts {
 		_, _ = hash.Write(d.GetData())
 	}
-	return int(hash.Sum32())
+	return hash.Sum32()
 }
 
 // Processes a data message
@@ -130,7 +130,7 @@ func (bwa *ParallelWriter) ScheduleDataMessage(dataMsg iface.DataMessage) error 
 		workerId = rand.Intn(bwa.numWorkers) // let's just randomly assign them to workers //XXX: how safe is this?
 	} else {
 		// hash the _id to determine the correct worker
-		workerId = hashDataMsgId(dataMsg) % bwa.numWorkers
+		workerId = int(hashDataMsgId(dataMsg) % uint32(bwa.numWorkers))
 	}
 	// add the message to the worker's queue
 	return bwa.workers[workerId].addMessage(dataMsg)

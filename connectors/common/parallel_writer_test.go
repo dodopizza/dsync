@@ -521,7 +521,7 @@ func TestIdsWithoutAnIdNamedPartHashOverAllParts(t *testing.T) {
 			id = append(id, &adiomv1.BsonValue{Name: name, Data: data})
 			_, _ = expected.Write(data)
 		}
-		assert.Equal(t, int(expected.Sum32()), hashDataMsgId(iface.DataMessage{Id: id}), "%v", names)
+		assert.Equal(t, expected.Sum32(), hashDataMsgId(iface.DataMessage{Id: id}), "%v", names)
 	}
 }
 
@@ -534,7 +534,7 @@ func TestIdsEqualInIdButDifferentInOtherPartsShareAWorker(t *testing.T) {
 }
 
 func TestDifferentIdValuesSpreadAcrossWorkers(t *testing.T) {
-	workers := map[int]bool{}
+	workers := map[uint32]bool{}
 	for row := range 200 {
 		workers[hashDataMsgId(pwShardedRowEvent(iface.MutationType_Update, row, true))%pwWorkers] = true
 	}
