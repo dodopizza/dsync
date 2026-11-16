@@ -616,41 +616,20 @@ func (c *conn) ListData(ctx context.Context, r *connect.Request[adiomv1.ListData
 		where = " WHERE "
 	}
 
-	q := fmt.Sprintf("SELECT * from %v%v%v ORDER BY %v LIMIT %v", SanitizeNamespace(namespace), where, strings.Join(whereQueries, " AND "), primaryKeysPartial, limit+1)
-	rows, err := c.c.Query(ctx, q, args...)
+	rows, err := c.listRows(ctx, namespace, keys, where+strings.Join(whereQueries, " AND "), args, limit)
 	if err != nil {
-		return nil, toConnectError(err)
-	}
-	ms, err := pgx.CollectRows(rows, pgx.RowToMap)
-	if err != nil {
-		return nil, toConnectError(err)
+		return nil, err
 	}
 
 	var data [][]byte
-
-	for i, m := range ms {
-		if i >= limit {
-			break
-		}
-		if err := c.prepareSourceDocument(namespace, m); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		marshalled, err := marshalWithRegistry(c.bsonRegistry, m)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		data = append(data, marshalled)
+	for _, row := range rows[:min(len(rows), limit)] {
+		data = append(data, row.doc)
 	}
 
 	var nextCursor []byte
-	if len(ms) > limit {
-		last := ms[limit]
-
+	if len(rows) > limit {
 		next := *cursor
-		next.Low = nil
-		for _, k := range keys {
-			next.Low = append(next.Low, last[k])
-		}
+		next.Low = rows[limit].key
 		nextCursor, err = next.Encode()
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("error encoding next cursor"))
@@ -752,6 +731,9 @@ func (c *conn) prepareSourceDocument(namespace string, values map[string]interfa
 }
 
 func (c *conn) toBsonAdiomUpdate(update pglib.Update) (*adiomv1.Update, error) {
+	if c.settings.DocumentMode {
+		return docSourceUpdate(update)
+	}
 	ns := update.Namespace + "." + update.TableName
 	switch update.Type {
 	case pglib.UpdateTypeInsert:
