@@ -66,6 +66,7 @@ Run locally in containers so far: connection error texts, state store with wrong
 * The state store has its own fixed-text sanitizer, separate from the connector's; the SQL batch connector has none [#28].
 * Caller context around a server error is printed as is; it is safe for the wrap sites that exist today. A new wrapper that puts sensitive text around a server error would print it [#28].
 * `HideConnDetails` also hides server errors now; the name no longer says so [#28].
+* Hiding a server error walks the error chain twice [#28].
 * The unit tests of connection errors assume that port 1 on localhost refuses connections [#28].
 * The `password=` guard covers global flags and the PostgreSQL connector's flags only, and refuses a harmless value containing `password=` [#22].
 * On a failed batch the core writer logs the first message, id bytes included [#22].
@@ -105,6 +106,8 @@ Run locally in containers so far: connection error texts, state store with wrong
 * With `--partition` and no `REPLICA IDENTITY FULL`, a delete of an int32 id is routed to another partition's run; a numeric id arrives as int64 [#26].
 * TRUNCATE stops the stream [#26].
 * Column mode does not restore the original BSON types [#26].
+* Sources whose multi-part ids have no part named `_id` are not supported [#26].
+* A leftover slot retains WAL; the README has the manual drop commands [#26].
 
 ## State store
 
@@ -113,6 +116,7 @@ Run locally in containers so far: connection error texts, state store with wrong
 * An attempt that times out on the client may still commit on the server [#25].
 * A failed state delete on `--cleanup` is only logged and the run exits 0 [#25].
 * An unreachable host without `connect_timeout` reports a deadline, not "could not connect" [#25].
+* Calls after `Teardown` fail with the generic request error [#25].
 * No automated test runs the SQL against a real PostgreSQL [#25].
 
 ## Cosmos DB source and emulated deletes
@@ -122,6 +126,8 @@ Run locally in containers so far: connection error texts, state store with wrong
 * The planner's debug log prints the smallest and largest `_id` [#21].
 * With `--full-document-key`, shard keys are fetched one namespace at a time at plan time [#21].
 * `StreamUpdates` and `GeneratePlan` are longer than 50 lines [#21].
+* Resuming after a pass error needs a persistent state store and the same flow; otherwise a restart begins a fresh plan [#27].
+* Check against the current delete pass whether these two notes still hold: a cursor error in the check drops the batch without failing the stream; the reply of its aggregate is read with an unchecked type assertion [#21].
 * Any pass error, transient ones included, ends the stream; dsync has to be restarted [#27].
 * The MongoDB witness does not apply `--namespace` and finds nothing, without an error, when names differ [#27].
 * The same numeric `_id` stored as different BSON number types in source and witness aborts every pass [#27].
@@ -137,6 +143,9 @@ Run locally in containers so far: connection error texts, state store with wrong
 * Read-plan publication and creation and `NotifyDone` run without the flow lock [#24].
 * Routing by `_id` alone puts all documents sharing an `_id` on one writer worker [#24].
 * The token map is gob-encoded under the stream lock on every batch; cost grows with the namespace count [#24].
+* The first error on a stream is sticky, token-map and cursor encode failures included [#24].
+* A writer worker that exits on context cancellation returns nil; the cancellation is reported on the producer side [#24].
+* Emulated deletes are counted into the LSN only after their send succeeds [#24].
 
 ## Housekeeping
 
