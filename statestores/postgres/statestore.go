@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"time"
 
@@ -72,12 +73,22 @@ func sanitize(err error) error {
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		return fmt.Errorf("postgres state store request failed: SQLSTATE %s", pgErr.Code)
 	}
+	return classify("postgres state store request failed", err)
+}
+
+func classify(msg string, err error) error {
+	if _, ok := errors.AsType[*pgconn.ConnectError](err); ok {
+		msg += ": could not connect"
+	}
 	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
 		if errors.Is(err, cause) {
-			return fmt.Errorf("postgres state store request failed: %w", cause)
+			return fmt.Errorf("%s: %w", msg, cause)
 		}
 	}
-	return errors.New("postgres state store request failed")
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+		msg += ": network timeout"
+	}
+	return errors.New(msg)
 }
 
 func (s *StateStore) Setup(ctx context.Context) error {
@@ -93,7 +104,7 @@ func (s *StateStore) Setup(ctx context.Context) error {
 		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 			return fmt.Errorf("postgres state store is not usable: %s: SQLSTATE %s", setupHint, pgErr.Code)
 		}
-		return fmt.Errorf("postgres state store is not usable: %s", setupHint)
+		return fmt.Errorf("%w: %s", classify("postgres state store is not usable", err), setupHint)
 	}
 	s.q, s.closePool = q, closePool
 	return nil

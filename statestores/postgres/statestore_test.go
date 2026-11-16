@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -213,7 +214,7 @@ func (h *hangingQuerier) Exec(ctx context.Context, _ string, _ ...any) (pgconn.C
 
 func (h *hangingQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
 
-func TestSetupChecksTheTableWithAColumnAndPrivilegeProbe(t *testing.T) {
+func TestSetupProbesTheTableColumnsWithASelect(t *testing.T) {
 	q := &fakeQuerier{}
 	newStore(t, q)
 
@@ -268,6 +269,37 @@ func TestErrorsHideConnectionDetails(t *testing.T) {
 				assert.NotContains(t, err.Error(), secret)
 			}
 		})
+	}
+}
+
+func TestErrorsNameTheFailureClassWithoutConnectionDetails(t *testing.T) {
+	connectErr := &pgconn.ConnectError{Config: &pgconn.Config{Host: sentinelHost, User: sentinelUser, Password: sentinelPass, Database: sentinelDB}}
+	timeoutErr := &net.DNSError{Err: "i/o timeout", Name: sentinelHost, Server: sentinelHost, IsTimeout: true}
+	classes := map[string]error{"could not connect": connectErr, "network timeout": timeoutErr}
+	for class, cause := range classes {
+		paths := map[string]func() error{
+			"setup": func() error {
+				s := NewPostgresStateStore(StateStoreSettings{})
+				s.open = func(context.Context, string) (querier, func(), error) {
+					return &fakeQuerier{exec: func(int) error { return cause }}, func() {}, nil
+				}
+				return s.Setup(t.Context())
+			},
+			"operation": func() error {
+				return newStore(t, &fakeQuerier{}).withFailure(cause)
+			},
+		}
+		for path, run := range paths {
+			t.Run(class+"/"+path, func(t *testing.T) {
+				err := run()
+
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), class)
+				for _, secret := range []string{sentinelHost, sentinelUser, sentinelPass, sentinelDB} {
+					assert.NotContains(t, err.Error(), secret)
+				}
+			})
+		}
 	}
 }
 

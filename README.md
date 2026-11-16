@@ -105,7 +105,7 @@ An alternative to the MongoDB `--metadata` store. It keeps dsync flow state in o
 * Select it by setting the environment variable `DSYNC_METADATA_POSTGRES` to a PostgreSQL connection string. The value is read only from the environment: there is no command-line flag, and a `--config` file key is ignored.
 * Setting it together with `--metadata` is an error.
 * The connection string is never printed. Database errors carry only a fixed message, plus the SQLSTATE when the server returned one.
-* dsync runs no DDL. Setup only checks that the table can be read, and otherwise fails with a pointer to this section. Missing INSERT, UPDATE or DELETE privileges surface at the first write with SQLSTATE 42501.
+* dsync runs no DDL. Setup only checks that the table can be read, and otherwise fails with a pointer to this section. Missing INSERT or UPDATE privileges surface at the first write, DELETE at the first delete, with SQLSTATE 42501.
 * It can live on the same server as the PostgreSQL destination; it uses its own connection string.
 * Values are stored as BSON in `data`. `updated_at` is the time of the last write.
 * After setup, transient errors (connection loss, serialization or deadlock failures, resource limits, attempt timeouts) are retried under `--meta-retries` and `--meta-retry-max-interval`, with a 30 s timeout per attempt. The setup check itself is not retried.
