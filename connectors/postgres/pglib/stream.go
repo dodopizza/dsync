@@ -173,6 +173,10 @@ func unchangedToastColumns(values map[string]interface{}) []string {
 }
 
 func (c *ChangeStream) Run(ctx context.Context, ch chan<- UpdateBatch) error {
+	return HideConnDetails(c.run(ctx, ch))
+}
+
+func (c *ChangeStream) run(ctx context.Context, ch chan<- UpdateBatch) error {
 	standbyMessageTimeout := time.Second * 10
 	minFlushDelay := c.MinFlushDelay
 	if c.StandbyMessageTimeout > 0 {

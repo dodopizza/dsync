@@ -11,7 +11,9 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type safeToRetryError struct{}
@@ -89,4 +91,85 @@ func TestIsTransientError(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) { assert.Equal(t, tc.want, IsTransientError(tc.err)) })
 	}
+}
+
+const unreachableURL = "postgres://secretuser:secretpass@127.0.0.1:1/secretdb?connect_timeout=1"
+
+func requireNoConnectionDetails(t *testing.T, err error) {
+	t.Helper()
+	requireNoDetailsInText(t, err.Error())
+}
+
+func requireNoDetailsInText(t *testing.T, text string) {
+	t.Helper()
+	for _, part := range []string{"secretuser", "secretpass", "secretdb", "127.0.0.1"} {
+		assert.NotContains(t, text, part)
+	}
+}
+
+func TestToConnectErrorHidesConnectionDetails(t *testing.T) {
+	_, dialErr := pgconn.Connect(t.Context(), unreachableURL)
+	_, isConnectError := errors.AsType[*pgconn.ConnectError](dialErr)
+	require.True(t, isConnectError)
+
+	got := toConnectError(fmt.Errorf("%w: %w", errSetReplicaRole, dialErr))
+
+	requireNoConnectionDetails(t, got)
+	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(got))
+	assert.True(t, IsTransientError(errors.Unwrap(got)))
+	requireNoConnectionDetails(t, classifyStreamError(dialErr))
+}
+
+func TestToConnectErrorHidesNetworkAddresses(t *testing.T) {
+	tcp := func(ip string) *net.TCPAddr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: 5432} }
+	cases := map[string]error{
+		"op error":  &net.OpError{Op: "read", Net: "tcp", Source: tcp("10.1.2.3"), Addr: tcp("10.9.9.9"), Err: syscall.ECONNRESET},
+		"dns error": &net.DNSError{Name: "secrethost.example", Err: "no such host", IsNotFound: true},
+	}
+	for name, original := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := toConnectError(fmt.Errorf("query: %w", original))
+
+			assert.Equal(t, connectCode(original), connect.CodeOf(got))
+			assert.Contains(t, got.Error(), "network error")
+			for _, part := range []string{"10.1.2.3", "10.9.9.9", "secrethost"} {
+				assert.NotContains(t, got.Error(), part)
+			}
+			assert.ErrorIs(t, got, original)
+			target, ok := errors.AsType[net.Error](got)
+			require.True(t, ok)
+			assert.Same(t, original, target)
+		})
+	}
+}
+
+func unreachableConn(t *testing.T) *conn {
+	t.Helper()
+	pool, err := pgxpool.New(t.Context(), unreachableURL)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return &conn{c: pool}
+}
+
+func TestSinkWriteLogHidesConnectionDetails(t *testing.T) {
+	logs := captureLogs(t)
+	c := unreachableConn(t)
+
+	err := c.executePostgresWrites(t.Context(), "public.t", []string{"id"}, []postgresWriteOperation{{delete: true, values: []any{1}}})
+
+	require.Error(t, err)
+	require.Contains(t, logs.String(), "Failed to execute PostgreSQL sink operation")
+	requireNoDetailsInText(t, logs.String())
+}
+
+func TestDropReplicationHidesConnectionDetails(t *testing.T) {
+	c := unreachableConn(t)
+	c.settings.SlotName = "dsync_slot"
+	c.settings.PublicationName = "dsync_pub"
+	c.created.create(func(markPublication, markSlot func()) error { markPublication(); markSlot(); return nil })
+
+	err := c.DropReplication(t.Context())
+
+	require.Error(t, err)
+	requireNoConnectionDetails(t, err)
 }

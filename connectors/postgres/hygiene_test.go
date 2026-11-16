@@ -17,7 +17,7 @@ import (
 
 const (
 	markerPassword = "s3cr3t-marker"
-	closedPortURL  = "postgres://u:" + markerPassword + "@127.0.0.1:1/d?sslmode=disable"
+	closedPortURL  = "postgres://markeruser:" + markerPassword + "@127.0.0.1:1/markerdb?sslmode=disable"
 	malformedURL   = "postgres://u:" + markerPassword + "@127.0.0.1:badport/d"
 	queryPassword  = "postgres://u@127.0.0.1:1/d?sslmode=disable&password=" + markerPassword
 	keywordValue   = "host=127.0.0.1 port=1 user=u password=" + markerPassword + " dbname=d sslmode=disable"
@@ -36,6 +36,9 @@ func assertNoSecrets(t *testing.T, url string, texts ...string) {
 	for _, text := range texts {
 		assert.NotContains(t, text, markerPassword)
 		assert.NotContains(t, text, url)
+		for _, part := range []string{"markeruser", "markerdb", "127.0.0.1"} {
+			assert.NotContains(t, text, part)
+		}
 	}
 }
 
@@ -50,6 +53,9 @@ func TestNewConnErrorsHideConnectionString(t *testing.T) {
 
 			require.Error(t, err)
 			assertNoSecrets(t, url, err.Error(), logs.String())
+			if name == "closed port" {
+				assert.Contains(t, err.Error(), "could not connect to postgres: connection refused")
+			}
 		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/adiom-data/dsync/connectors/postgres/pglib"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -30,7 +31,7 @@ func toConnectError(err error) error {
 	if _, ok := errors.AsType[*connect.Error](err); ok {
 		return err
 	}
-	return connect.NewError(connectCode(err), err)
+	return connect.NewError(connectCode(err), pglib.HideConnDetails(err))
 }
 
 func connectCode(err error) connect.Code {

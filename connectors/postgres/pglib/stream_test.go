@@ -25,10 +25,10 @@ func TestErrorResponseErrorKeepsPgError(t *testing.T) {
 func TestRunErrorsHideConnectionString(t *testing.T) {
 	const password = "s3cr3t-marker"
 	for name, url := range map[string]string{
-		"malformed":      "postgres://u:" + password + "@127.0.0.1:badport/d?replication=database",
-		"keyword value":  "host=127.0.0.1 port=1 user=u password=" + password + " dbname=d sslmode=bogus replication=database",
-		"query password": "postgres://u@127.0.0.1:1/d?password=" + password + "&sslmode=bogus&replication=database",
-		"closed port":    "postgres://u:" + password + "@127.0.0.1:1/d?sslmode=disable&replication=database",
+		"malformed":      "postgres://markeruser:" + password + "@127.0.0.1:badport/markerdb?replication=database",
+		"keyword value":  "host=127.0.0.1 port=1 user=markeruser password=" + password + " dbname=markerdb sslmode=bogus replication=database",
+		"query password": "postgres://markeruser@127.0.0.1:1/markerdb?password=" + password + "&sslmode=bogus&replication=database",
+		"closed port":    "postgres://markeruser:" + password + "@127.0.0.1:1/markerdb?sslmode=disable&replication=database",
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -39,6 +39,9 @@ func TestRunErrorsHideConnectionString(t *testing.T) {
 			require.Error(t, err)
 			assert.NotContains(t, err.Error(), password)
 			assert.NotContains(t, err.Error(), url)
+			for _, part := range []string{"markeruser", "markerdb", "127.0.0.1"} {
+				assert.NotContains(t, err.Error(), part)
+			}
 			_, isParseError := errors.AsType[*pgconn.ParseConfigError](err)
 			assert.False(t, isParseError)
 		})

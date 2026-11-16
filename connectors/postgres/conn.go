@@ -114,7 +114,7 @@ func (c *conn) sendSinkBatch(ctx context.Context, batch *pgx.Batch, count int, o
 	}
 	if err := results.Close(); err != nil {
 		if !c.settings.DocumentMode && !errors.Is(err, context.Canceled) {
-			slog.Error(fmt.Sprintf("Failed to complete batch: %v", err))
+			slog.Error(fmt.Sprintf("Failed to complete batch: %v", pglib.HideConnDetails(err)))
 		}
 		return toConnectError(err)
 	}
@@ -367,23 +367,23 @@ func NewConn(ctx context.Context, settings PostgresSettings) (*conn, error) {
 	config.AfterConnect = afterConnect
 	c, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		return nil, err
+		return nil, toConnectError(err)
 	}
 
 	pkeys, err := getTablePrimaryKeySchema(ctx, c)
 	if err != nil {
 		c.Close()
-		return nil, err
+		return nil, toConnectError(err)
 	}
 	columns, err := getTableColumns(ctx, c)
 	if err != nil {
 		c.Close()
-		return nil, err
+		return nil, toConnectError(err)
 	}
 	sinkMetadata, err := getSinkTableMetadata(ctx, c, pkeys)
 	if err != nil {
 		c.Close()
-		return nil, err
+		return nil, toConnectError(err)
 	}
 	hasIDColumn, idAliases := idColumnMetadata(columns, pkeys)
 
@@ -1078,7 +1078,7 @@ func (c *conn) executePostgresWrites(ctx context.Context, namespace string, pkey
 			return
 		}
 		operation := operations[i]
-		slog.Error("Failed to execute PostgreSQL sink operation", "index", operation.requestIndex, "error", err)
+		slog.Error("Failed to execute PostgreSQL sink operation", "index", operation.requestIndex, "error", pglib.HideConnDetails(err))
 		if operation.delete {
 			slog.Debug("Failed delete operation", "pkValues", operation.values)
 			return
