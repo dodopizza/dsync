@@ -133,7 +133,7 @@ func getPrimaryKey(primaryKeys []string, data map[string]interface{}) []interfac
 }
 
 func getTablePrimaryKeySchema(ctx context.Context, c *pgxpool.Pool) (map[string][]string, error) {
-	rows, err := c.Query(ctx, "SELECT t.table_schema, t.table_name, c.column_name FROM information_schema.key_column_usage AS c LEFT JOIN information_schema.table_constraints AS t ON t.constraint_name = c.constraint_name WHERE t.constraint_type = 'PRIMARY KEY' AND t.table_schema != 'pg_catalog' order by t.table_schema, t.table_name, c.ordinal_position;")
+	rows, err := c.Query(ctx, "SELECT t.table_schema, t.table_name, c.column_name FROM information_schema.key_column_usage AS c JOIN information_schema.table_constraints AS t ON t.constraint_schema = c.constraint_schema AND t.constraint_name = c.constraint_name AND t.table_schema = c.table_schema AND t.table_name = c.table_name WHERE t.constraint_type = 'PRIMARY KEY' AND t.table_schema != 'pg_catalog' order by t.table_schema, t.table_name, c.ordinal_position;")
 	if err != nil {
 		return nil, err
 	}
