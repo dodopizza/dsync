@@ -207,3 +207,23 @@ func TestLoadDocTableReturnsOneEntryPerColumnWhenAnotherTableReferencesTheKey(t 
 	assert.Equal(t, []string{"id"}, got.PrimaryKey)
 	assert.Equal(t, []docColumn{{Name: "note", Type: "text"}}, got.Columns)
 }
+
+func TestRefuseUniqueIndexesNamesTheIndexAndAllowsPlainOnes(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, "CREATE TABLE %s.plain (id text, region text, doc jsonb, note text, PRIMARY KEY (id, region))", f.schema)
+	f.exec(ctx, t, "CREATE INDEX plain_note ON %s.plain (note)", f.schema)
+	f.exec(ctx, t, "CREATE TABLE %s.constrained (id text PRIMARY KEY, doc jsonb, note text, CONSTRAINT constrained_note UNIQUE (note))", f.schema)
+	f.exec(ctx, t, "CREATE TABLE %s.expression (id text PRIMARY KEY, doc jsonb)", f.schema)
+	f.exec(ctx, t, "CREATE UNIQUE INDEX expression_email ON %s.expression ((doc->>'email')) WHERE doc ? 'email'", f.schema)
+	f.exec(ctx, t, "CREATE TABLE %s.excluded (id text PRIMARY KEY, doc jsonb, note text, CONSTRAINT excluded_note EXCLUDE USING btree (note WITH =))", f.schema)
+
+	require.NoError(t, refuseUniqueIndexes(ctx, f.pool, f.schema+".plain"))
+	for table, index := range map[string]string{"constrained": "constrained_note", "expression": "expression_email", "excluded": "excluded_note"} {
+		err := refuseUniqueIndexes(ctx, f.pool, f.schema+"."+table)
+		require.Error(t, err, table)
+		assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+		assert.Contains(t, err.Error(), f.schema+"."+table)
+		assert.Contains(t, err.Error(), index)
+	}
+}

@@ -138,11 +138,11 @@ func TestDocumentModeServerErrorsNeverCarryDocumentValuesInErrorOrLogs(t *testin
 	assert.NotContains(t, logs.String(), marker)
 	assert.NotEqual(t, connect.CodeUnavailable, connect.CodeOf(err))
 
-	f.exec(ctx, t, `CREATE TABLE %s.tags (id text PRIMARY KEY, doc jsonb NOT NULL, tag text UNIQUE)`, f.schema)
-	must(t, writeDocs(ctx, c, f.schema+".tags", rawDoc(t, bson.D{{Key: "_id", Value: int32(1)}, {Key: "tag", Value: marker}})), "first tag")
+	f.exec(ctx, t, `CREATE TABLE %s.tags (id text PRIMARY KEY, doc jsonb NOT NULL, tag text CONSTRAINT tags_tag_check CHECK (tag = ''))`, f.schema)
 	err = writeDocs(ctx, c, f.schema+".tags", rawDoc(t, bson.D{{Key: "_id", Value: int32(2)}, {Key: "tag", Value: marker}}))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "document 0: constraint tags_tag_key: SQLSTATE 23505")
+	assert.Contains(t, err.Error(), "document 0")
+	assert.Contains(t, err.Error(), "constraint tags_tag_check: SQLSTATE 23514")
 	assert.NotContains(t, err.Error(), marker)
 	assert.NotContains(t, logs.String(), marker)
 }
@@ -302,24 +302,20 @@ func TestDocumentModeStoresUpdatedAtFieldInsteadOfTheClock(t *testing.T) {
 	assert.Equal(t, clock, readRow(ctx, t, f, "n:2").UpdatedAt.UTC())
 }
 
-func TestDocumentModeIgnoresDeferrableUniqueConstraintsBesideThePrimaryKey(t *testing.T) {
+func TestDocumentModeRefusesUniqueConstraintsBesideThePrimaryKeyBeforeWriting(t *testing.T) {
 	ctx := testContext(t)
 	f := newDocFixture(ctx, t)
-	f.exec(ctx, t, `CREATE TABLE %s.single (id text, doc jsonb NOT NULL, note text, PRIMARY KEY (id), UNIQUE (id) DEFERRABLE)`, f.schema)
+	f.exec(ctx, t, `CREATE TABLE %s.single (id text, doc jsonb NOT NULL, note text, PRIMARY KEY (id), CONSTRAINT single_note UNIQUE (note))`, f.schema)
 	f.exec(ctx, t, `CREATE TABLE %s.composite (id text, doc jsonb NOT NULL, region text, note text,
-		PRIMARY KEY (id, region), UNIQUE (id, region) DEFERRABLE INITIALLY DEFERRED)`, f.schema)
+		PRIMARY KEY (id, region), CONSTRAINT composite_twin UNIQUE (id, region) DEFERRABLE INITIALLY DEFERRED)`, f.schema)
 	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
 
-	for _, table := range []string{"single", "composite"} {
-		doc := func(id int32, note string) []byte {
-			return rawDoc(t, bson.D{{Key: "_id", Value: id}, {Key: "region", Value: "eu"}, {Key: "note", Value: note}})
-		}
-		ns := f.schema + "." + table
-		must(t, writeDocs(ctx, c, ns, doc(1, "a"), doc(2, "a")), table+" first copy")
-		must(t, writeDocs(ctx, c, ns, doc(1, "a"), doc(2, "b")), table+" second copy")
+	for table, index := range map[string]string{"single": "single_note", "composite": "composite_twin"} {
+		err := writeDocs(ctx, c, f.schema+"."+table, rawDoc(t, bson.D{{Key: "_id", Value: int32(1)}, {Key: "region", Value: "eu"}, {Key: "note", Value: "a"}}))
 
-		var note string
-		must(t, f.pool.QueryRow(ctx, `SELECT note FROM `+ns+` WHERE id = 'n:2'`).Scan(&note), table+" read")
-		assert.Equal(t, "b", note, table)
+		require.Error(t, err, table)
+		assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), table)
+		assert.Contains(t, err.Error(), index, table)
+		assert.Zero(t, countRows(ctx, t, f, table), table)
 	}
 }

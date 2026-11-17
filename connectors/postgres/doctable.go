@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -23,6 +24,12 @@ LEFT JOIN pg_catalog.pg_index i ON i.indrelid = a.attrelid AND i.indisprimary
 LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid AND con.contype = 'p'
 WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum`
+	docUniqueIndexSQL = `SELECT c.relname
+FROM pg_catalog.pg_index i
+JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+WHERE i.indrelid = to_regclass($1) AND NOT i.indisprimary AND (i.indisunique OR i.indisexclusion)
+ORDER BY c.relname
+LIMIT 1`
 )
 
 type docColumn struct {
@@ -128,4 +135,16 @@ func primaryKeyOf(columns []catalogColumn) []string {
 		key = append(key, c.Name)
 	}
 	return key
+}
+
+func refuseUniqueIndexes(ctx context.Context, c *pgxpool.Pool, namespace string) error {
+	var index string
+	err := c.QueryRow(ctx, docUniqueIndexSQL, SanitizeNamespace(namespace)).Scan(&index)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return toConnectError(err)
+	}
+	return shapeError(namespace, "index %s is unique: until the transfer ends a document-mode destination table may have no unique or exclusion index besides the primary key", index)
 }

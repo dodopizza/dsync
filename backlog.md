@@ -95,10 +95,11 @@ Run locally in containers so far: connection error texts, state store with wrong
 * The first table-shape loads are serialised by one mutex [#22].
 * The SQL batch connector cannot feed document mode [#22].
 * Without `--updated-at-field` the updated-at column ends at the replay time when the replayed window holds more than one version of a document [#24].
-* A value moved between rows under a secondary UNIQUE constraint inside the replayed window fails the replay with SQLSTATE 23505 [#24].
+* Unique and exclusion indexes besides the primary key are refused before the first write. Foreign keys and CHECK constraints are not looked at; an index added while dsync runs is not seen until a restart.
 
 ### Column mode and PostgreSQL as a source
 
+* Column mode does not refuse secondary unique indexes: a value moved between rows inside the replayed window fails the replay with SQLSTATE 23505 [#24].
 * Omitted columns with a default are reset on every conflict, so sequence or time defaults change on every write and replay [#24].
 * `TRUNCATE` is ignored; `streaming 'true'` is requested but stream commit and abort messages are not handled; composite primary keys with `timestamptz` are gob-encoded [#20].
 * A source role with SELECT only on a table gets `no primary key found for namespace …`: the key lookup does not see constraints of tables the role has only SELECT on. Seen in a local check; the message should name the privilege.
