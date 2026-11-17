@@ -21,7 +21,7 @@ const (
 )
 
 var (
-	postgresDateMin = time.Date(-4712, 1, 1, 0, 0, 0, 0, time.UTC)
+	postgresDateMin = time.Date(-4713, 11, 24, 0, 0, 0, 0, time.UTC)
 	postgresDateMax = time.Date(294277, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 

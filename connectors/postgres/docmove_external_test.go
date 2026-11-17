@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -96,4 +97,26 @@ func TestDocumentModeReplaysAMovedDoubleThatOnlyChangedItsZeroSign(t *testing.T)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, hashOf(t, negative), hashOf(t, rows[0].doc))
+}
+
+func TestDocumentModeReplaysAMovedDoubleThatChangedToTheAdjacentValueUnderReducedFloatDigits(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, `CREATE TABLE %s.adjacent (id text PRIMARY KEY, doc jsonb, ratio double precision)`, f.schema)
+	ns := f.schema + ".adjacent"
+	config := f.pool.Config()
+	config.ConnConfig.RuntimeParams["extra_float_digits"] = "0"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	must(t, err, "pool")
+	t.Cleanup(pool.Close)
+	c := &conn{c: pool, settings: PostgresSettings{DocumentMode: true}}
+	next := rawDoc(t, bson.D{{Key: "_id", Value: "a"}, {Key: "ratio", Value: math.Nextafter(1, 2)}})
+
+	must(t, writeDocs(ctx, c, ns, rawDoc(t, bson.D{{Key: "_id", Value: "a"}, {Key: "ratio", Value: 1.0}})), "write one")
+	must(t, writeDocs(ctx, c, ns, next), "write next")
+
+	rows, err := c.listDocRows(ctx, ns, []string{"id"}, `"id"`, "", nil, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hashOf(t, next), hashOf(t, rows[0].doc))
 }

@@ -339,17 +339,19 @@ func TestDocBatchArgsRejectsAMovedDateOutsideThePostgresRange(t *testing.T) {
 		require.Error(t, err, millis)
 		assert.Contains(t, err.Error(), "column at")
 	}
-	edge := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "Region", Value: "eu"}, {Key: "at", Value: bson.DateTime(postgresDateMax.UnixMilli() - 1)}})
-	_, err := docBatchArgs(plan, [][]byte{edge}, time.Time{})
-	require.NoError(t, err)
+	for _, edge := range []time.Time{time.Date(-4713, 11, 24, 0, 0, 0, 0, time.UTC), time.Date(294276, 12, 31, 23, 59, 59, 999e6, time.UTC)} {
+		raw := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "Region", Value: "eu"}, {Key: "at", Value: bson.DateTime(edge.UnixMilli())}})
+		_, err := docBatchArgs(plan, [][]byte{raw}, time.Time{})
+		require.NoError(t, err, edge)
+	}
 }
 
-func TestDocUpsertSQLComparesMovedDoublesAsText(t *testing.T) {
+func TestDocUpsertSQLComparesMovedDoublesByTheirBytes(t *testing.T) {
 	query := movePlan(t).query
 
-	assert.Contains(t, query, `t."ratio"::text`)
-	assert.Contains(t, query, `EXCLUDED."ratio"::text`)
-	assert.NotContains(t, query, `t."big"::text`)
+	assert.Contains(t, query, `pg_catalog.float8send(t."ratio")`)
+	assert.Contains(t, query, `pg_catalog.float8send(EXCLUDED."ratio")`)
+	assert.NotContains(t, query, `float8send(t."big")`)
 }
 
 func TestBuildDocPlanRejectsAJSONBPrimaryKeyColumn(t *testing.T) {

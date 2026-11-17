@@ -113,19 +113,19 @@ func quoteIdents(names []string) []string {
 func docUpsertSQL(namespace string, plan *docPlan) string {
 	names := []string{docIDColumn, docDocColumn}
 	var current, incoming []string
-	compare := func(name, cast string) {
-		quoted := pgx.Identifier{name}.Sanitize() + cast
-		current, incoming = append(current, "t."+quoted), append(incoming, "EXCLUDED."+quoted)
+	compare := func(name, format string) {
+		quoted := pgx.Identifier{name}.Sanitize()
+		current, incoming = append(current, fmt.Sprintf(format, "t."+quoted)), append(incoming, fmt.Sprintf(format, "EXCLUDED."+quoted))
 	}
-	compare(docDocColumn, "")
+	compare(docDocColumn, "%s")
 	var set []string
 	set = append(set, docDocColumn)
 	for _, col := range plan.columns {
 		names = append(names, col.Name)
 		if col.Move && col.Type == "double precision" {
-			compare(col.Name, "::text")
+			compare(col.Name, "pg_catalog.float8send(%s)")
 		} else {
-			compare(col.Name, "")
+			compare(col.Name, "%s")
 		}
 		if !slices.Contains(plan.table.PrimaryKey, col.Name) {
 			set = append(set, col.Name)
