@@ -17,7 +17,10 @@ const (
 	identityAlways = "a"
 	docColumnsSQL  = `SELECT a.attname, pg_catalog.format_type(a.atttypid, NULL), a.attgenerated <> '', a.attidentity::text,
 	CASE WHEN array_position(i.indkey::int2[], a.attnum) < i.indnkeyatts THEN array_position(i.indkey::int2[], a.attnum) + 1 ELSE 0 END::int,
-	COALESCE(NOT i.indimmediate, false), COALESCE(con.conname, '')
+	COALESCE(NOT i.indimmediate, false), COALESCE(con.conname, ''),
+	COALESCE((SELECT pg_catalog.col_description(r.attrelid, r.attnum) FROM pg_catalog.pg_attribute r
+		WHERE r.attrelid = COALESCE(pg_catalog.pg_partition_root(a.attrelid), a.attrelid) AND r.attname = a.attname AND NOT r.attisdropped), ''),
+	a.atttypmod <> -1
 FROM pg_catalog.pg_attribute a
 LEFT JOIN pg_catalog.pg_index i ON i.indrelid = a.attrelid AND i.indisprimary
 LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid AND con.contype = 'p'
@@ -33,6 +36,7 @@ WHERE (i.indrelid = to_regclass($1) OR i.indrelid IN (SELECT relid FROM pg_catal
 type docColumn struct {
 	Name string
 	Type string
+	Move bool
 }
 
 type docTable struct {
@@ -49,6 +53,8 @@ type catalogColumn struct {
 	KeyOrder   int
 	Deferrable bool
 	Constraint string
+	Comment    string
+	Modifier   bool
 }
 
 func (c catalogColumn) unwritable() bool {
@@ -82,9 +88,14 @@ func shapeDocTable(namespace string, columns []catalogColumn, primaryKey []strin
 	}
 	var selected []docColumn
 	for _, c := range columns {
-		if c.Name != docIDColumn && c.Name != docDocColumn && !c.unwritable() {
-			selected = append(selected, docColumn{Name: c.Name, Type: c.Type})
+		if c.Name == docIDColumn || c.Name == docDocColumn || c.unwritable() {
+			continue
 		}
+		move, err := moveMode(c, slices.Contains(primaryKey, c.Name))
+		if err != nil {
+			return docTable{}, shapeError(namespace, "%v", err)
+		}
+		selected = append(selected, docColumn{Name: c.Name, Type: c.Type, Move: move})
 	}
 	return docTable{Columns: selected, PrimaryKey: primaryKey, Constraint: constraintOf(columns)}, nil
 }
@@ -99,7 +110,7 @@ func loadDocTable(ctx context.Context, c *pgxpool.Pool, namespace string) (docTa
 	}
 	columns, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (catalogColumn, error) {
 		var col catalogColumn
-		err := row.Scan(&col.Name, &col.Type, &col.Generated, &col.Identity, &col.KeyOrder, &col.Deferrable, &col.Constraint)
+		err := row.Scan(&col.Name, &col.Type, &col.Generated, &col.Identity, &col.KeyOrder, &col.Deferrable, &col.Constraint, &col.Comment, &col.Modifier)
 		return col, err
 	})
 	if err != nil {

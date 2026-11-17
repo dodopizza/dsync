@@ -17,6 +17,14 @@ func rawDoc(t *testing.T, v any) []byte {
 	return raw
 }
 
+func encodeDoc(raw []byte) ([]byte, error) {
+	doc := bson.Raw(raw)
+	if err := validateDoc(doc); err != nil {
+		return nil, err
+	}
+	return bson.MarshalExtJSON(doc, true, false)
+}
+
 func TestEncodeDocCanonicalExtendedJSON(t *testing.T) {
 	oid, err := bson.ObjectIDFromHex("507f1f77bcf86cd799439011")
 	require.NoError(t, err)

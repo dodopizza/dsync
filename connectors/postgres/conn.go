@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"regexp"
 	"slices"
@@ -72,8 +73,9 @@ type conn struct {
 	settings     PostgresSettings
 	bsonRegistry *bson.Registry
 
-	docs docState
-	now  func() time.Time
+	docs  docCache[*docPlan]
+	moved docCache[[]docColumn]
+	now   func() time.Time
 
 	created createdReplication
 }
@@ -740,11 +742,18 @@ func (c *conn) prepareSourceDocument(namespace string, values map[string]interfa
 	return nil
 }
 
-func (c *conn) toBsonAdiomUpdate(update pglib.Update) (*adiomv1.Update, error) {
-	if c.settings.DocumentMode {
-		return docSourceUpdate(update)
-	}
+func (c *conn) toBsonAdiomUpdate(ctx context.Context, update pglib.Update) (*adiomv1.Update, error) {
 	ns := update.Namespace + "." + update.TableName
+	if c.settings.DocumentMode {
+		if update.Type != pglib.UpdateTypeInsert && update.Type != pglib.UpdateTypeUpdate {
+			return docSourceUpdate(update, nil)
+		}
+		moved, err := c.movedColumns(ctx, ns)
+		if err != nil {
+			return nil, err
+		}
+		return docSourceUpdate(update, moved)
+	}
 	switch update.Type {
 	case pglib.UpdateTypeInsert:
 		keys, err := c.sourceUpdateID(ns, update.New)
@@ -861,7 +870,10 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 					return nil
 				}
 				for _, update := range updateBatch.Updates {
-					up, err := c.toBsonAdiomUpdate(update)
+					up, err := c.toBsonAdiomUpdate(ctx, update)
+					if _, coded := errors.AsType[*connect.Error](err); coded {
+						return err
+					}
 					if err != nil {
 						return connect.NewError(connect.CodeInternal, err)
 					}
@@ -1268,13 +1280,21 @@ func validSlotName(name string) bool {
 	return slotNamePattern.MatchString(name)
 }
 
+var replicationParams = map[string]string{"replication": "database", "extra_float_digits": "3", "datestyle": "ISO", "intervalstyle": "postgres", "bytea_output": "hex"}
+
 func createReplicationUrl(urlString string) (string, error) {
 	parsed, err := url.Parse(urlString)
 	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
 		return "", errors.New("invalid postgres connection string")
 	}
 	query := parsed.Query()
-	query.Add("replication", "database")
+	maps.DeleteFunc(query, func(name string, _ []string) bool {
+		_, forced := replicationParams[strings.ToLower(name)]
+		return forced
+	})
+	for name, value := range replicationParams {
+		query.Set(name, value)
+	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }

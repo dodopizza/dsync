@@ -94,6 +94,16 @@ Run locally in containers so far: connection error texts, state store with wrong
 * The decode half of the id codec has no production caller [#22].
 * The first table-shape loads are serialised by one mutex [#22].
 * The SQL batch connector cannot feed document mode [#22].
+* With PostgreSQL as a streaming source the moved columns come from the catalog as it is now, not as it was when the change was logged: a column in move mode added while the stream lags fails the replay until it gets a `copy` comment.
+* Reading a document-mode table now loads the same table shape as writing, so a table the write path refuses (a deferrable primary key, a bad `dsync:` comment) is refused as a source too.
+* A moved `text` column under a nondeterministic collation skips an update that changes only what the collation ignores (letter case, for example), because the upsert compares columns with the column's collation.
+* A value in the replication stream that the driver cannot decode (a `jsonb` number outside the float64 range written by something other than dsync) fails with the driver's error text, which can quote the value.
+* A moved date in year 10000 or later is written and read back by a list read, but with PostgreSQL as a streaming source the driver cannot parse it and the stream stops with the driver's error text, which quotes the value.
+* With PostgreSQL as a streaming source a table's shape is loaded from the current catalog the first time the connection needs it and is then kept, so a queued insert or update fails the replay if its table was dropped or renamed before that first load.
+* Move mode takes top-level fields only; a column cannot name a nested path.
+* Move mode has no `numeric` pair: PostgreSQL normalises the value, so the read-back document would differ. Such columns stay in copy mode.
+* Move mode stores `jsonb` columns as canonical Extended JSON; a plain JSON form would not survive `verify`.
+* A NaN payload or other value that PostgreSQL normalises in a moved column is not checked for; read-back through logical replication with moved columns has unit coverage only, with values decoded by the text codecs.
 * Without `--updated-at-field` the updated-at column ends at the replay time when the replayed window holds more than one version of a document [#24].
 * Unique and exclusion indexes besides the primary key, on the table or its partitions, are refused before the first write to that table, not at flow start; the check is a second catalog query per table under the plan lock. A unique index whose key columns, not INCLUDE columns, contain every primary key column is refused too, though harmless. Foreign keys and CHECK constraints are not looked at; an index added while dsync runs is not seen until a restart.
 

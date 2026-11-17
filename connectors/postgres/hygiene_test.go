@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,18 @@ func TestCreateReplicationUrlAcceptsOnlyPostgresSchemes(t *testing.T) {
 		_, err := createReplicationUrl(url)
 		assert.EqualError(t, err, "invalid postgres connection string", url)
 	}
+}
+
+func TestCreateReplicationUrlFixesTheTextOutputOfStreamedValues(t *testing.T) {
+	got, err := createReplicationUrl("postgres://u@127.0.0.1:1/d?extra_float_digits=0&EXTRA_FLOAT_DIGITS=0&DateStyle=German&replication=false&sslmode=disable")
+	require.NoError(t, err)
+	parsed, err := url.Parse(got)
+	require.NoError(t, err)
+
+	assert.Equal(t, url.Values{
+		"replication": {"database"}, "sslmode": {"disable"}, "extra_float_digits": {"3"},
+		"datestyle": {"ISO"}, "intervalstyle": {"postgres"}, "bytea_output": {"hex"},
+	}, parsed.Query())
 }
 
 func TestNewConnRejectsKeywordValueString(t *testing.T) {

@@ -251,7 +251,7 @@ func TestKeyValuesReturnsIDThenKeyColumnsInPrimaryKeyOrder(t *testing.T) {
 }
 
 func TestDocStateLoadsOncePerNamespaceUnderParallelFirstWritesAndDoesNotCacheFailures(t *testing.T) {
-	var state docState
+	var state docCache[*docPlan]
 	var loads atomic.Int32
 	plan := &docPlan{query: "q"}
 	var wg sync.WaitGroup
@@ -337,13 +337,13 @@ func TestDocBatchArgsNullUpdatedAtFieldFallsBackToTheClock(t *testing.T) {
 
 func TestBuildDocPlanAllowsOnlyComparableSelectedColumnTypes(t *testing.T) {
 	allowed := []string{"text", "character varying", "character", "smallint", "integer", "bigint", "real", "double precision",
-		"numeric", "boolean", "timestamp with time zone", "timestamp without time zone", "date", "bytea", "uuid"}
+		"numeric", "boolean", "timestamp with time zone", "timestamp without time zone", "date", "bytea", "uuid", "jsonb"}
 	for _, typ := range allowed {
 		table := docTable{Columns: []docColumn{{Name: "extra", Type: typ}}, PrimaryKey: []string{"id"}}
 		_, err := buildDocPlan("app.items", table, PostgresSettings{})
 		require.NoError(t, err, typ)
 	}
-	for _, typ := range []string{"json", "jsonb", "xml", "point", "text[]", "inet"} {
+	for _, typ := range []string{"json", "xml", "point", "text[]", "inet"} {
 		table := docTable{Columns: []docColumn{{Name: "extra", Type: typ}}, PrimaryKey: []string{"id"}}
 		_, err := buildDocPlan("app.items", table, PostgresSettings{})
 		require.Error(t, err, typ)

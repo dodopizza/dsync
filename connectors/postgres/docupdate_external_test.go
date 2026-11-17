@@ -155,7 +155,7 @@ func TestDocumentModeEmptyPartialUpdateLeavesTheRowUntouched(t *testing.T) {
 func TestDocumentModeUpdateServerErrorsNeverCarryValuesInErrorOrLogs(t *testing.T) {
 	ctx := testContext(t)
 	f := newDocFixture(ctx, t)
-	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n integer)`, f.schema)
+	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n integer); COMMENT ON COLUMN %[1]s.numbers.n IS 'dsync:{"mode":"copy"}'`, f.schema)
 	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
 	logs := captureLogs(t)
 
@@ -255,7 +255,7 @@ func TestDocumentModeUpdateWithKeyPartThatDiffersFromTheDocumentChangesNoRow(t *
 func TestDocumentModeUpdateErrorNamesTheRequestPositionAfterSkippedEmptyPartials(t *testing.T) {
 	ctx := testContext(t)
 	f := newDocFixture(ctx, t)
-	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n integer)`, f.schema)
+	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n integer); COMMENT ON COLUMN %[1]s.numbers.n IS 'dsync:{"mode":"copy"}'`, f.schema)
 	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
 	empty := &adiomv1.Update{Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE}
 
