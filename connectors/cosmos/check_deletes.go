@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/adiom-data/dsync/protocol/iface"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -142,53 +143,94 @@ func checkSourceIdsAndGenerateDeletes(ctx context.Context, client *mongo.Client,
 // Checks if the ids exist in the source and sends those that don't to the delete channel
 func checkSourceIdsAndGenerateDeletesWorker(ctx context.Context, client *mongo.Client, idsWithLoc idsWithLocation, idsToDelete chan<- idsWithLocation) {
 	slog.Debug(fmt.Sprintf("Checking source for ids: %+v (first: %v, last: %v, n: %v)", idsWithLoc.loc, idsWithLoc.ids[0], idsWithLoc.ids[len(idsWithLoc.ids)-1], len(idsWithLoc.ids)))
-	// we will take advatage of the $setDifference MongoDB aggregation operator to find the ids that are not in the source
-	// it does work in Cosmos, which is great!
-	// db.col.aggregate([ {$match:{_id:{$in: ID'S}}},{ "$group": { "_id": null, "ids": { "$addToSet": "$_id" } } }, { "$project": { "missingIds": { "$setDifference": [ID'S, "$ids"] }, "_id": 0 } }] )
-
-	// create a pipeline to find the missing ids
-	pipeline := mongo.Pipeline{
-		{{"$match", bson.D{{"_id", bson.D{{"$in", idsWithLoc.ids}}}}}},
-		{{"$group", bson.D{{"_id", nil}, {"ids", bson.D{{"$addToSet", "$_id"}}}}}},
-		{{"$project", bson.D{
-			{"missingIds", bson.D{{"$setDifference", bson.A{idsWithLoc.ids, "$ids"}}}},
-			{"_id", 0},
-		}}},
-	}
-
-	cur, err := client.Database(idsWithLoc.loc.Database).Collection(idsWithLoc.loc.Collection).Aggregate(ctx, pipeline)
+	missingIds, err := missingInSource(ctx, findInSource(client), idsWithLoc.loc, idsWithLoc.ids, waitBeforeRecheck)
 	if err != nil {
-		slog.Error(fmt.Sprintf("Failed to aggregate: %v", err))
+		// Fail closed: a source we could not read proves nothing about deletes.
+		slog.Error(fmt.Sprintf("Failed to check the source for deletes in %v: %v", idsWithLoc.loc, err))
 		return
 	}
-	defer cur.Close(ctx)
-	// extract the missing ids
-	var missingIds []interface{}
-	var res bson.M
-	if cur.Next(ctx) {
-		err := cur.Decode(&res)
-		if err != nil {
-			slog.Error(fmt.Sprintf("Failed to decode missing ids: %v", err))
-			return
-		}
-
-		if res["missingIds"] == nil {
-			slog.Debug(fmt.Sprintf("No missing ids found on the source for %v", idsWithLoc.loc))
-			return
-		}
-
-		// convert result to array
-		missingIds = []interface{}(res["missingIds"].(bson.A))
-	} else {
-		slog.Debug(fmt.Sprintf("Missing ids source query returned nothing for %v", idsWithLoc.loc))
-		//this means all are missing on the source!
-		missingIds = idsWithLoc.ids
-	}
-
 	if len(missingIds) > 0 {
 		slog.Debug(fmt.Sprintf("Found %v missing ids for %v", len(missingIds), idsWithLoc.loc))
 		idsToDelete <- idsWithLocation{loc: idsWithLoc.loc, ids: missingIds}
 	}
+}
+
+// sourceLookup returns the ids, out of the given ones, that the source has.
+type sourceLookup func(ctx context.Context, loc iface.Location, ids []interface{}) ([]interface{}, error)
+
+// deleteRecheckDelay separates the two lookups that must both miss an id before it is deleted.
+const deleteRecheckDelay = 5 * time.Second
+
+func waitBeforeRecheck(ctx context.Context) error {
+	select {
+	case <-time.After(deleteRecheckDelay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// findInSource looks the ids up with find, not with an aggregation: on Cosmos DB for MongoDB the
+// $match/$group/$setDifference pipeline this used to run loses a few percent of the matches, and every id
+// it loses was deleted from the destination although the source still had it.
+func findInSource(client *mongo.Client) sourceLookup {
+	return func(ctx context.Context, loc iface.Location, ids []interface{}) ([]interface{}, error) {
+		opts := options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}})
+		cur, err := client.Database(loc.Database).Collection(loc.Collection).Find(ctx, bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}}}, opts)
+		if err != nil {
+			return nil, err
+		}
+		defer cur.Close(ctx)
+		var found []interface{}
+		for cur.Next(ctx) {
+			var doc bson.M
+			if err := cur.Decode(&doc); err != nil {
+				return nil, err
+			}
+			found = append(found, doc["_id"])
+		}
+		return found, cur.Err()
+	}
+}
+
+// missingInSource returns the ids the source has on neither of two lookups. The second one asks only for the
+// ids the first missed: one incomplete answer must not delete a document that is still in the source.
+func missingInSource(ctx context.Context, lookup sourceLookup, loc iface.Location, ids []interface{}, wait func(context.Context) error) ([]interface{}, error) {
+	candidates, err := absentFrom(ctx, lookup, loc, ids)
+	if err != nil || len(candidates) == 0 {
+		return nil, err
+	}
+	if err := wait(ctx); err != nil {
+		return nil, err
+	}
+	return absentFrom(ctx, lookup, loc, candidates)
+}
+
+func absentFrom(ctx context.Context, lookup sourceLookup, loc iface.Location, ids []interface{}) ([]interface{}, error) {
+	found, err := lookup(ctx, loc, ids)
+	if err != nil {
+		return nil, err
+	}
+	present := make(map[string]struct{}, len(found))
+	for _, id := range found {
+		present[canonicalID(id)] = struct{}{}
+	}
+	var absent []interface{}
+	for _, id := range ids {
+		if _, ok := present[canonicalID(id)]; !ok {
+			absent = append(absent, id)
+		}
+	}
+	return absent, nil
+}
+
+// canonicalID is the BSON type and bytes of an id: equal ids decoded apart compare equal.
+func canonicalID(id interface{}) string {
+	t, data, err := bson.MarshalValue(id)
+	if err != nil {
+		return fmt.Sprintf("unmarshalable:%v", id)
+	}
+	return string(rune(t)) + string(data)
 }
 
 /****************************************************
