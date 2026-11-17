@@ -331,19 +331,21 @@ func TestDocBatchArgsKeepsAFieldNamedLikeTheUpdatedAtColumnInDoc(t *testing.T) {
 
 func TestDocBatchArgsRejectsAMovedDateOutsideThePostgresRange(t *testing.T) {
 	plan := movePlan(t)
-	for _, millis := range []int64{1 << 61, -(1 << 61), postgresDateMax.UnixMilli(), postgresDateMin.UnixMilli() - 1} {
+	first := time.Date(-4713, 11, 24, 0, 0, 0, 0, time.UTC).UnixMilli()
+	last := time.Date(294276, 12, 31, 23, 59, 59, 999e6, time.UTC).UnixMilli()
+	write := func(millis int64) error {
 		raw := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "Region", Value: "eu"}, {Key: "at", Value: bson.DateTime(millis)}})
-
 		_, err := docBatchArgs(plan, [][]byte{raw}, time.Time{})
+		return err
+	}
 
+	for _, millis := range []int64{1 << 61, -(1 << 61), last + 1, first - 1} {
+		err := write(millis)
 		require.Error(t, err, millis)
 		assert.Contains(t, err.Error(), "column at")
 	}
-	for _, edge := range []time.Time{time.Date(-4713, 11, 24, 0, 0, 0, 0, time.UTC), time.Date(294276, 12, 31, 23, 59, 59, 999e6, time.UTC)} {
-		raw := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "Region", Value: "eu"}, {Key: "at", Value: bson.DateTime(edge.UnixMilli())}})
-		_, err := docBatchArgs(plan, [][]byte{raw}, time.Time{})
-		require.NoError(t, err, edge)
-	}
+	require.NoError(t, write(first))
+	require.NoError(t, write(last))
 }
 
 func TestDocUpsertSQLComparesMovedDoublesByTheirBytes(t *testing.T) {
