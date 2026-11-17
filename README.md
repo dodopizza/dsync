@@ -132,6 +132,7 @@ Rules of move mode:
 * On a partitioned table only the comments on the top-level parent count; a comment on a partition is ignored.
 * A date outside the range of `timestamp with time zone` fails the write.
 * The modes are read once per table and connection; a comment changed while dsync runs is not seen until a restart.
+* Changing a column from move to copy after rows were written hides the moved values from the reader: those rows keep the field only in the column. Rewrite the rows (rerun the copy) after such a change.
 
 Rows whose `doc` still holds fields besides `_id` and the key columns (here `tenant`) can be counted with:
 ```sql

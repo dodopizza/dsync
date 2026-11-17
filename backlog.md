@@ -98,6 +98,8 @@ Run locally in containers so far: connection error texts, state store with wrong
 * Reading a document-mode table now loads the same table shape as writing, so a table the write path refuses (a deferrable primary key, a bad `dsync:` comment) is refused as a source too.
 * A moved `text` column under a nondeterministic collation skips an update that changes only what the collation ignores (letter case, for example), because the upsert compares columns with the column's collation.
 * A value in the replication stream that the driver cannot decode (a `jsonb` number outside the float64 range written by something other than dsync) fails with the driver's error text, which can quote the value.
+* A moved date in year 10000 or later is written and read back by a list read, but with PostgreSQL as a streaming source the driver cannot parse it and the stream stops with the driver's error text, which quotes the value.
+* With PostgreSQL as a streaming source every insert and update in document mode loads the table shape from the current catalog, so a change to a table that was dropped or renamed while the stream lags fails the replay.
 * Move mode takes top-level fields only; a column cannot name a nested path.
 * Move mode has no `numeric` pair: PostgreSQL normalises the value, so the read-back document would differ. Such columns stay in copy mode.
 * Move mode stores `jsonb` columns as canonical Extended JSON; a plain JSON form would not survive `verify`.

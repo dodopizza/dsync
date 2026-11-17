@@ -1279,13 +1279,18 @@ func validSlotName(name string) bool {
 	return slotNamePattern.MatchString(name)
 }
 
+var streamTextOutput = map[string]string{"extra_float_digits": "3", "datestyle": "ISO", "intervalstyle": "postgres", "bytea_output": "hex"}
+
 func createReplicationUrl(urlString string) (string, error) {
 	parsed, err := url.Parse(urlString)
 	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
 		return "", errors.New("invalid postgres connection string")
 	}
 	query := parsed.Query()
-	query.Add("replication", "database")
+	query.Set("replication", "database")
+	for name, value := range streamTextOutput {
+		query.Set(name, value)
+	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
