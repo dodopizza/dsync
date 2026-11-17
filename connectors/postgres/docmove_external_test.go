@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,5 +78,22 @@ func TestDocumentModeTakesTheMappingCommentOfAPartitionFromItsParent(t *testing.
 		return got
 	}
 	assert.Equal(t, map[string]bool{"region": false, "n": false, "own": true}, moves(parent))
-	assert.Equal(t, map[string]bool{"region": false, "n": false, "own": false}, moves(partition))
+	assert.Equal(t, map[string]bool{"region": false, "n": false, "own": true}, moves(partition))
+}
+
+func TestDocumentModeReplaysAMovedDoubleThatOnlyChangedItsZeroSign(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, `CREATE TABLE %s.zeros (id text PRIMARY KEY, doc jsonb, ratio double precision)`, f.schema)
+	ns := f.schema + ".zeros"
+	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
+	negative := rawDoc(t, bson.D{{Key: "_id", Value: "a"}, {Key: "ratio", Value: math.Copysign(0, -1)}})
+
+	must(t, writeDocs(ctx, c, ns, rawDoc(t, bson.D{{Key: "_id", Value: "a"}, {Key: "ratio", Value: 0.0}})), "write positive")
+	must(t, writeDocs(ctx, c, ns, negative), "write negative")
+
+	rows, err := c.listDocRows(ctx, ns, []string{"id"}, `"id"`, "", nil, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hashOf(t, negative), hashOf(t, rows[0].doc))
 }

@@ -88,9 +88,7 @@ func readValues(t *testing.T, plan *docPlan, args []any) (string, []any) {
 		case col.Type == "uuid":
 			value = [16]byte(value.([]byte))
 		case col.Type == "jsonb":
-			var decoded any
-			require.NoError(t, json.Unmarshal(jsonbNormalize(t, value.([]byte)), &decoded))
-			value = decoded
+			value = jsonText(jsonbNormalize(t, value.([]byte)))
 		}
 		values = append(values, value)
 	}
@@ -232,6 +230,11 @@ func TestMovedColumnsRestoreTheDocumentWithTheSameHashOnListAndStream(t *testing
 			row := map[string]any{"id": "s:k1", "doc": doc, "Region": "eu"}
 			for i, col := range moved {
 				row[col.Name] = values[i]
+				if text, ok := values[i].(jsonText); ok {
+					var decoded any
+					require.NoError(t, json.Unmarshal([]byte(text), &decoded))
+					row[col.Name] = decoded
+				}
 			}
 			got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeUpdate, New: row}, moved)
 			require.NoError(t, err)
@@ -324,4 +327,52 @@ func TestDocBatchArgsKeepsAFieldNamedLikeTheUpdatedAtColumnInDoc(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"_id":"k1","at":"text"}`, string(batch[0].args[1].([]byte)))
+}
+
+func TestDocBatchArgsRejectsAMovedDateOutsideThePostgresRange(t *testing.T) {
+	plan := movePlan(t)
+	for _, millis := range []int64{1 << 61, -(1 << 61), postgresDateMax.UnixMilli(), postgresDateMin.UnixMilli() - 1} {
+		raw := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "Region", Value: "eu"}, {Key: "at", Value: bson.DateTime(millis)}})
+
+		_, err := docBatchArgs(plan, [][]byte{raw}, time.Time{})
+
+		require.Error(t, err, millis)
+		assert.Contains(t, err.Error(), "column at")
+	}
+	edge := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "Region", Value: "eu"}, {Key: "at", Value: bson.DateTime(postgresDateMax.UnixMilli() - 1)}})
+	_, err := docBatchArgs(plan, [][]byte{edge}, time.Time{})
+	require.NoError(t, err)
+}
+
+func TestDocUpsertSQLComparesMovedDoublesAsText(t *testing.T) {
+	query := movePlan(t).query
+
+	assert.Contains(t, query, `t."ratio"::text`)
+	assert.Contains(t, query, `EXCLUDED."ratio"::text`)
+	assert.NotContains(t, query, `t."big"::text`)
+}
+
+func TestBuildDocPlanRejectsAJSONBPrimaryKeyColumn(t *testing.T) {
+	_, err := buildDocPlan("app.items", docTable{
+		Columns:    []docColumn{{Name: "tenant", Type: typeJSONB}},
+		PrimaryKey: []string{docIDColumn, "tenant"},
+	}, PostgresSettings{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tenant")
+}
+
+func TestRestoreMovedTakesJSONBAsTextAndHidesABadValue(t *testing.T) {
+	moved := []docColumn{{Name: "v", Type: typeJSONB, Move: true}}
+	stored := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}})
+
+	got, err := restoreMoved(stored, moved, []any{jsonText(`{"a": {"$numberInt": "1"}}`)})
+	require.NoError(t, err)
+	assert.Equal(t, hashOf(t, rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "v", Value: bson.D{{Key: "a", Value: int32(1)}}}})), hashOf(t, got))
+
+	for _, text := range []jsonText{jsonText(`{"a": {"$numberInt": "` + marker + `"}}`), jsonText(`"` + marker + `"`)} {
+		_, err = restoreMoved(stored, moved, []any{text})
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), marker)
+	}
 }

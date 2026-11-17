@@ -72,7 +72,12 @@ func buildDocPlan(namespace string, table docTable, settings PostgresSettings) (
 	found := updatedAt == ""
 	for _, col := range table.Columns {
 		if col.Name != updatedAt {
-			if !slices.Contains(table.PrimaryKey, col.Name) && !comparableTypes[col.Type] && col.Type != typeJSONB {
+			key := slices.Contains(table.PrimaryKey, col.Name)
+			writable := key || comparableTypes[col.Type]
+			if col.Type == typeJSONB {
+				writable = !key
+			}
+			if !writable {
 				return nil, shapeError(namespace, "column %s has type %s, which document mode cannot write", col.Name, col.Type)
 			}
 			columns = append(columns, col)
@@ -107,12 +112,21 @@ func quoteIdents(names []string) []string {
 
 func docUpsertSQL(namespace string, plan *docPlan) string {
 	names := []string{docIDColumn, docDocColumn}
-	compare := []string{docDocColumn}
+	var current, incoming []string
+	compare := func(name, cast string) {
+		quoted := pgx.Identifier{name}.Sanitize() + cast
+		current, incoming = append(current, "t."+quoted), append(incoming, "EXCLUDED."+quoted)
+	}
+	compare(docDocColumn, "")
 	var set []string
 	set = append(set, docDocColumn)
 	for _, col := range plan.columns {
 		names = append(names, col.Name)
-		compare = append(compare, col.Name)
+		if col.Move && col.Type == "double precision" {
+			compare(col.Name, "::text")
+		} else {
+			compare(col.Name, "")
+		}
 		if !slices.Contains(plan.table.PrimaryKey, col.Name) {
 			set = append(set, col.Name)
 		}
@@ -129,21 +143,12 @@ func docUpsertSQL(namespace string, plan *docPlan) string {
 	for i, name := range quoteIdents(set) {
 		assignments[i] = name + " = EXCLUDED." + name
 	}
-	current, incoming := prefixed("t.", compare), prefixed("EXCLUDED.", compare)
 	return fmt.Sprintf(
 		"INSERT INTO %s AS t (%s) VALUES (%s) ON CONFLICT ON CONSTRAINT %s DO UPDATE SET %s WHERE (%s) IS DISTINCT FROM (%s)",
 		SanitizeNamespace(namespace), strings.Join(quoteIdents(names), ", "), strings.Join(placeholders, ", "),
 		pgx.Identifier{plan.table.Constraint}.Sanitize(), strings.Join(assignments, ", "),
 		strings.Join(current, ", "), strings.Join(incoming, ", "),
 	)
-}
-
-func prefixed(prefix string, names []string) []string {
-	out := quoteIdents(names)
-	for i := range out {
-		out[i] = prefix + out[i]
-	}
-	return out
 }
 
 func scalarValue(rv bson.RawValue) (any, error) {

@@ -20,6 +20,13 @@ const (
 	fragmentOpen  = `{"v":`
 )
 
+var (
+	postgresDateMin = time.Date(-4712, 1, 1, 0, 0, 0, 0, time.UTC)
+	postgresDateMax = time.Date(294277, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+type jsonText string
+
 type movePair struct {
 	accepts func(bson.RawValue) bool
 	restore func(any) (bson.RawValue, bool)
@@ -31,10 +38,15 @@ var movePairs = map[string]movePair{
 	"double precision": pairOf(ofType(bson.TypeDouble), func(v float64) any { return v }),
 	"text":             pairOf(ofType(bson.TypeString), func(v string) any { return v }),
 	"boolean":          pairOf(ofType(bson.TypeBoolean), func(v bool) any { return v }),
-	typeTimeTZ:         pairOf(ofType(bson.TypeDateTime), func(v time.Time) any { return bson.NewDateTimeFromTime(v) }),
+	typeTimeTZ:         pairOf(dateInRange, func(v time.Time) any { return bson.NewDateTimeFromTime(v) }),
 	"uuid":             pairOf(binaryOf(bson.TypeBinaryUUID, 16), func(v [16]byte) any { return bson.Binary{Subtype: bson.TypeBinaryUUID, Data: v[:]} }),
 	"bytea":            pairOf(binaryOf(bson.TypeBinaryGeneric, -1), func(v []byte) any { return bson.Binary{Data: v} }),
 	typeJSONB:          {accepts: ofType(bson.TypeEmbeddedDocument, bson.TypeArray), restore: restoreJSON},
+}
+
+func dateInRange(rv bson.RawValue) bool {
+	millis, ok := rv.DateTimeOK()
+	return ok && millis >= postgresDateMin.UnixMilli() && millis < postgresDateMax.UnixMilli()
 }
 
 func ofType(types ...bson.Type) func(bson.RawValue) bool {
@@ -60,12 +72,16 @@ func pairOf[T any](accepts func(bson.RawValue) bool, convert func(T) any) movePa
 }
 
 func restoreJSON(v any) (bson.RawValue, bool) {
-	text, err := json.Marshal(map[string]any{"v": v}, json.Deterministic(true))
-	if err != nil {
-		return bson.RawValue{}, false
+	text, isText := v.(jsonText)
+	if !isText {
+		encoded, err := json.Marshal(v, json.Deterministic(true))
+		if err != nil {
+			return bson.RawValue{}, false
+		}
+		text = jsonText(encoded)
 	}
 	var raw bson.Raw
-	if err := bson.UnmarshalExtJSON(text, true, &raw); err != nil {
+	if err := bson.UnmarshalExtJSON([]byte(fragmentOpen+string(text)+"}"), true, &raw); err != nil {
 		return bson.RawValue{}, false
 	}
 	rv := raw.Lookup("v")

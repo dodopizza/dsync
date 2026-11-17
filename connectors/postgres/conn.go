@@ -870,6 +870,9 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 				}
 				for _, update := range updateBatch.Updates {
 					up, err := c.toBsonAdiomUpdate(ctx, update)
+					if _, coded := errors.AsType[*connect.Error](err); coded {
+						return err
+					}
 					if err != nil {
 						return connect.NewError(connect.CodeInternal, err)
 					}

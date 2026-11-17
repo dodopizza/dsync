@@ -208,6 +208,9 @@ func (c *conn) listDocRows(ctx context.Context, namespace string, keys []string,
 	selected := primaryKeysPartial
 	for _, col := range moved {
 		selected += ", " + pgx.Identifier{col.Name}.Sanitize()
+		if col.Type == typeJSONB {
+			selected += "::text"
+		}
 	}
 	q := fmt.Sprintf("SELECT %v::text, %v from %v%v ORDER BY %v LIMIT %v", pgx.Identifier{docDocColumn}.Sanitize(), selected, SanitizeNamespace(namespace), where, primaryKeysPartial, limit+1)
 	rows, err := c.c.Query(ctx, q, args...)
@@ -220,7 +223,13 @@ func (c *conn) listDocRows(ctx context.Context, namespace string, keys []string,
 			return sourceRow{}, err
 		}
 		text, _ := values[0].(string)
-		return sourceRow{key: values[1 : 1+len(keys)], text: text, moved: values[1+len(keys):]}, nil
+		columns := values[1+len(keys):]
+		for i, col := range moved {
+			if fragment, ok := columns[i].(string); ok && col.Type == typeJSONB {
+				columns[i] = jsonText(fragment)
+			}
+		}
+		return sourceRow{key: values[1 : 1+len(keys)], text: text, moved: columns}, nil
 	})
 	if err != nil {
 		return nil, toConnectError(err)
