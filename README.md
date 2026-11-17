@@ -131,8 +131,8 @@ Rules of move mode:
 * With PostgreSQL as a streaming source the table needs `REPLICA IDENTITY FULL` when moved values are large enough to be stored out of line.
 * On a partitioned table only the comments on the top-level parent count; a comment on a partition is ignored.
 * A date outside the range of `timestamp with time zone` fails the write.
-* A date in year 10000 or later is written and is read back by a list read and `verify`, but stops a PostgreSQL streaming source: the driver cannot parse it.
-* With PostgreSQL as a streaming source dsync sets `extra_float_digits`, `DateStyle`, `IntervalStyle` and `bytea_output` on the replication connection itself. Values for them in the connection string are replaced, and role or database settings for them do not apply.
+* A moved date in year 10000 or later (up to the column's limit) is written and is read back by a list read, the first pass of `verify` included. When such a value arrives in a change of a PostgreSQL streaming source, which `verify` reads too, the driver cannot parse it and the stream stops.
+* With PostgreSQL as a streaming source dsync sets `extra_float_digits`, `DateStyle`, `IntervalStyle` and `bytea_output` on the replication connection itself, in column mode as well as in document mode. Values for them in the connection string are replaced, and role or database settings for them do not apply.
 * The modes are read once per table and connection; a comment changed while dsync runs is not seen until a restart.
 * Changing a column from move to copy after rows were written hides the moved values from the reader: those rows keep the field only in the column. Rewrite the rows (rerun the copy) after such a change.
 
