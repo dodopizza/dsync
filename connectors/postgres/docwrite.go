@@ -41,26 +41,26 @@ type docPlan struct {
 	delete    string
 }
 
-type docState struct {
+type docCache[T any] struct {
 	mu    sync.Mutex
-	plans map[string]*docPlan
+	items map[string]T
 }
 
-func (s *docState) get(namespace string, load func() (*docPlan, error)) (*docPlan, error) {
+func (s *docCache[T]) get(namespace string, load func() (T, error)) (T, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if plan, ok := s.plans[namespace]; ok {
-		return plan, nil
+	if item, ok := s.items[namespace]; ok {
+		return item, nil
 	}
-	plan, err := load()
+	item, err := load()
 	if err != nil {
-		return nil, err
+		return item, err
 	}
-	if s.plans == nil {
-		s.plans = map[string]*docPlan{}
+	if s.items == nil {
+		s.items = map[string]T{}
 	}
-	s.plans[namespace] = plan
-	return plan, nil
+	s.items[namespace] = item
+	return item, nil
 }
 
 func buildDocPlan(namespace string, table docTable, settings PostgresSettings) (*docPlan, error) {
@@ -72,7 +72,7 @@ func buildDocPlan(namespace string, table docTable, settings PostgresSettings) (
 	found := updatedAt == ""
 	for _, col := range table.Columns {
 		if col.Name != updatedAt {
-			if !slices.Contains(table.PrimaryKey, col.Name) && !comparableTypes[col.Type] {
+			if !slices.Contains(table.PrimaryKey, col.Name) && !comparableTypes[col.Type] && col.Type != typeJSONB {
 				return nil, shapeError(namespace, "column %s has type %s, which document mode cannot write", col.Name, col.Type)
 			}
 			columns = append(columns, col)
@@ -199,11 +199,10 @@ func keyValues(primaryKey []string, id string, values map[string]any) ([]any, er
 }
 
 func (p *docPlan) args(raw []byte, now time.Time) ([]any, error) {
-	encoded, err := encodeDoc(raw)
-	if err != nil {
+	doc := bson.Raw(raw)
+	if err := validateDoc(doc); err != nil {
 		return nil, err
 	}
-	doc := bson.Raw(raw)
 	idValue, err := doc.LookupErr(idField)
 	if err != nil {
 		return nil, fmt.Errorf("missing %s", idField)
@@ -213,7 +212,8 @@ func (p *docPlan) args(raw []byte, now time.Time) ([]any, error) {
 		return nil, err
 	}
 	values := make(map[string]any, len(p.columns))
-	args := []any{id, encoded}
+	moved := map[string]bool{}
+	args := []any{id, nil}
 	for _, col := range p.columns {
 		value, err := columnValue(doc, col)
 		if err != nil {
@@ -221,8 +221,18 @@ func (p *docPlan) args(raw []byte, now time.Time) ([]any, error) {
 		}
 		values[col.Name] = value
 		args = append(args, value)
+		if col.Move && value != nil {
+			moved[col.Name] = true
+		}
 	}
 	if _, err := keyValues(p.table.PrimaryKey, id, values); err != nil {
+		return nil, err
+	}
+	rest, err := withoutFields(doc, moved)
+	if err != nil {
+		return nil, err
+	}
+	if args[1], err = bson.MarshalExtJSON(rest, true, false); err != nil {
 		return nil, err
 	}
 	if p.updatedAt == "" {
@@ -239,6 +249,12 @@ func columnValue(doc bson.Raw, col docColumn) (any, error) {
 	rv, err := doc.LookupErr(col.Name)
 	if err != nil || rv.Type == bson.TypeNull {
 		return nil, nil
+	}
+	if col.Move && !movePairs[col.Type].accepts(rv) {
+		return nil, fmt.Errorf("BSON type %s cannot move into a column of type %s", rv.Type, col.Type)
+	}
+	if col.Type == typeJSONB {
+		return jsonFragment(rv)
 	}
 	return typedValue(rv, col)
 }

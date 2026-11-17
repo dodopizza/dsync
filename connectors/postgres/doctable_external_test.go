@@ -76,7 +76,7 @@ func TestLoadDocTableReadsCompositeKeyGeneratedAndQuotedColumns(t *testing.T) {
 	got, err := loadDocTable(ctx, f.pool, f.schema+".items")
 
 	require.NoError(t, err)
-	assert.Equal(t, []docColumn{{"region", "text"}, {"MixedCase", "integer"}, {"default_id", "bigint"}, {"tags", "text[]"}}, got.Columns)
+	assert.Equal(t, []docColumn{{Name: "region", Type: "text"}, {Name: "MixedCase", Type: "integer", Move: true}, {Name: "default_id", Type: "bigint", Move: true}, {Name: "tags", Type: "text[]"}}, got.Columns)
 	assert.Equal(t, []string{"id", "region"}, got.PrimaryKey)
 }
 
@@ -149,7 +149,7 @@ GRANT SELECT ON %[1]s.items TO PUBLIC`, f.schema))
 	got, err := loadDocTable(ctx, f.pool, f.schema+".items")
 
 	require.NoError(t, err)
-	assert.Equal(t, []docColumn{{"region", "text"}}, got.Columns)
+	assert.Equal(t, []docColumn{{Name: "region", Type: "text"}}, got.Columns)
 	assert.Equal(t, []string{"region", "id"}, got.PrimaryKey)
 }
 
@@ -162,7 +162,7 @@ ALTER TABLE %[1]s.items DROP COLUMN gone`, f.schema)
 	got, err := loadDocTable(ctx, f.pool, f.schema+".items")
 
 	require.NoError(t, err)
-	assert.Equal(t, []docColumn{{"region", "text"}}, got.Columns)
+	assert.Equal(t, []docColumn{{Name: "region", Type: "text"}}, got.Columns)
 	assert.Equal(t, []string{"id", "region"}, got.PrimaryKey)
 }
 
@@ -205,7 +205,7 @@ func TestLoadDocTableReturnsOneEntryPerColumnWhenAnotherTableReferencesTheKey(t 
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"id"}, got.PrimaryKey)
-	assert.Equal(t, []docColumn{{Name: "note", Type: "text"}}, got.Columns)
+	assert.Equal(t, []docColumn{{Name: "note", Type: "text", Move: true}}, got.Columns)
 }
 
 func TestRefuseUniqueIndexesNamesTheIndexAndAllowsPlainOnes(t *testing.T) {

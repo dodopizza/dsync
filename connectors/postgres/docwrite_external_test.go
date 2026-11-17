@@ -40,7 +40,8 @@ func readRow(ctx context.Context, t *testing.T, f *docFixture, id string) docRow
 
 func newItemsTable(ctx context.Context, t *testing.T, f *docFixture) string {
 	f.exec(ctx, t, `CREATE TABLE %s."Items" (id text NOT NULL, doc jsonb NOT NULL, "Region" text NOT NULL, "MixedCase" integer,
-		updated_at timestamptz, PRIMARY KEY (id, "Region"))`, f.schema)
+		updated_at timestamptz, PRIMARY KEY (id, "Region"));
+		COMMENT ON COLUMN %[1]s."Items"."MixedCase" IS 'dsync:{"mode":"copy"}'`, f.schema)
 	return f.schema + ".Items"
 }
 
@@ -83,7 +84,8 @@ func TestDocumentModeWritesEveryScalarTypeAndNullsAbsentColumns(t *testing.T) {
 	ctx := testContext(t)
 	f := newDocFixture(ctx, t)
 	f.exec(ctx, t, `CREATE TABLE %s.kinds (id text PRIMARY KEY, doc jsonb NOT NULL, s text, i32 integer, i64 bigint, d double precision,
-		dec numeric, b boolean, ts timestamptz, oid text, bin bytea, missing text)`, f.schema)
+		dec numeric, b boolean, ts timestamptz, oid text, bin bytea, missing text);
+		COMMENT ON COLUMN %[1]s.kinds.oid IS 'dsync:{"mode":"copy"}'`, f.schema)
 	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
 	when := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
 	oid := bson.NewObjectID()
@@ -122,7 +124,7 @@ func TestDocumentModeWritesEveryScalarTypeAndNullsAbsentColumns(t *testing.T) {
 func TestDocumentModeServerErrorsNeverCarryDocumentValuesInErrorOrLogs(t *testing.T) {
 	ctx := testContext(t)
 	f := newDocFixture(ctx, t)
-	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n integer)`, f.schema)
+	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n integer); COMMENT ON COLUMN %[1]s.numbers.n IS 'dsync:{"mode":"copy"}'`, f.schema)
 	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
 	logs := captureLogs(t)
 
@@ -150,7 +152,7 @@ func TestDocumentModeServerErrorsNeverCarryDocumentValuesInErrorOrLogs(t *testin
 func TestDocumentModeClientEncodeFailuresClaimNoBatchPositionAndAreNotRetried(t *testing.T) {
 	ctx := testContext(t)
 	f := newDocFixture(ctx, t)
-	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n bigint)`, f.schema)
+	f.exec(ctx, t, `CREATE TABLE %s.numbers (id text PRIMARY KEY, doc jsonb NOT NULL, n bigint); COMMENT ON COLUMN %[1]s.numbers.n IS 'dsync:{"mode":"copy"}'`, f.schema)
 	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
 	ns := f.schema + ".numbers"
 	doc := func(id int32, n any) []byte { return rawDoc(t, bson.D{{Key: "_id", Value: id}, {Key: "n", Value: n}}) }
@@ -254,7 +256,7 @@ func TestDocumentModeRejectsColumnTypesWithoutEqualityAtShapeLoad(t *testing.T) 
 func TestDocumentModeRejectsFractionalDoublesAndStoresWholeOnesInIntegerColumns(t *testing.T) {
 	ctx := testContext(t)
 	f := newDocFixture(ctx, t)
-	f.exec(ctx, t, `CREATE TABLE %s.counts (id text PRIMARY KEY, doc jsonb NOT NULL, n integer)`, f.schema)
+	f.exec(ctx, t, `CREATE TABLE %s.counts (id text PRIMARY KEY, doc jsonb NOT NULL, n integer); COMMENT ON COLUMN %[1]s.counts.n IS 'dsync:{"mode":"copy"}'`, f.schema)
 	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
 
 	err := writeDocs(ctx, c, f.schema+".counts", rawDoc(t, bson.D{{Key: "_id", Value: int32(1)}, {Key: "n", Value: 1.5}}))

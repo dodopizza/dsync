@@ -9,15 +9,11 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-func encodeDoc(raw []byte) ([]byte, error) {
-	doc := bson.Raw(raw)
+func validateDoc(doc bson.Raw) error {
 	if err := doc.Validate(); err != nil {
-		return nil, fmt.Errorf("malformed BSON document")
+		return fmt.Errorf("malformed BSON document")
 	}
-	if err := checkDocument(doc, "", rejectWrapperKey); err != nil {
-		return nil, err
-	}
-	return bson.MarshalExtJSON(doc, true, false)
+	return checkDocument(doc, "", rejectWrapperKey)
 }
 
 func checkDocument(doc bson.Raw, path string, keyCheck func(path, key string) error) error {

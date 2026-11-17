@@ -72,8 +72,9 @@ type conn struct {
 	settings     PostgresSettings
 	bsonRegistry *bson.Registry
 
-	docs docState
-	now  func() time.Time
+	docs  docCache[*docPlan]
+	moved docCache[[]docColumn]
+	now   func() time.Time
 
 	created createdReplication
 }
@@ -740,11 +741,18 @@ func (c *conn) prepareSourceDocument(namespace string, values map[string]interfa
 	return nil
 }
 
-func (c *conn) toBsonAdiomUpdate(update pglib.Update) (*adiomv1.Update, error) {
-	if c.settings.DocumentMode {
-		return docSourceUpdate(update)
-	}
+func (c *conn) toBsonAdiomUpdate(ctx context.Context, update pglib.Update) (*adiomv1.Update, error) {
 	ns := update.Namespace + "." + update.TableName
+	if c.settings.DocumentMode {
+		if update.Type != pglib.UpdateTypeInsert && update.Type != pglib.UpdateTypeUpdate {
+			return docSourceUpdate(update, nil)
+		}
+		moved, err := c.movedColumns(ctx, ns)
+		if err != nil {
+			return nil, err
+		}
+		return docSourceUpdate(update, moved)
+	}
 	switch update.Type {
 	case pglib.UpdateTypeInsert:
 		keys, err := c.sourceUpdateID(ns, update.New)
@@ -861,7 +869,7 @@ func (c *conn) StreamUpdates(ctx context.Context, req *connect.Request[adiomv1.S
 					return nil
 				}
 				for _, update := range updateBatch.Updates {
-					up, err := c.toBsonAdiomUpdate(update)
+					up, err := c.toBsonAdiomUpdate(ctx, update)
 					if err != nil {
 						return connect.NewError(connect.CodeInternal, err)
 					}

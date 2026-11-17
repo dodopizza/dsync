@@ -110,7 +110,7 @@ func TestListRowsEmitTheOriginalDocumentWithItsOriginalIDBytes(t *testing.T) {
 			raw, text, idText, _ := storedRow(t, id)
 			rows := []sourceRow{{key: []any{"eu", idText}, text: text}}
 
-			require.NoError(t, fillDocs(rows, []string{"region", "id"}, 1))
+			require.NoError(t, fillDocs(rows, []string{"region", "id"}, nil, 1))
 
 			assertDocIDBytes(t, raw, rows[0].doc)
 		})
@@ -127,7 +127,7 @@ func TestDocSourceUpdateInsertAndUpdateCarryDocAndMongoIDPart(t *testing.T) {
 				raw, _, idText, doc := storedRow(t, id)
 				row := map[string]any{"id": idText, "doc": doc, "region": "eu", "updated_at": "ignored"}
 
-				got, err := docSourceUpdate(pglib.Update{Type: typ, New: row})
+				got, err := docSourceUpdate(pglib.Update{Type: typ, New: row}, nil)
 
 				require.NoError(t, err)
 				assert.Equal(t, kind, got.Type)
@@ -144,7 +144,7 @@ func TestDocSourceUpdateDeleteWithOldDocMatchesMongoIDPart(t *testing.T) {
 			_, _, idText, doc := storedRow(t, id)
 			old := map[string]any{"id": idText, "doc": doc, "region": "eu"}
 
-			got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeDelete, Old: old})
+			got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeDelete, Old: old}, nil)
 
 			require.NoError(t, err)
 			assert.Equal(t, adiomv1.UpdateType_UPDATE_TYPE_DELETE, got.Type)
@@ -165,13 +165,13 @@ func TestDocSourceUpdateDeleteWithoutOldDocFallsBackToTheIDColumn(t *testing.T) 
 				{"id": idText, "doc": nil, "region": "eu"},
 				{"id": idText, "region": "eu"},
 			} {
-				got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeDelete, Old: old})
+				got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeDelete, Old: old}, nil)
 				require.NoError(t, err)
 				require.Len(t, got.Id, 1)
 				assert.Equal(t, uint32(want.Type), got.Id[0].Type)
 				assert.Equal(t, want.Value, got.Id[0].Data)
 			}
-			got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeDelete, Old: map[string]any{"id": idText, "doc": nil}})
+			got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeDelete, Old: map[string]any{"id": idText, "doc": nil}}, nil)
 
 			require.NoError(t, err)
 			require.Len(t, got.Id, 1)
@@ -204,7 +204,7 @@ func TestDocSourceUpdateRejectsBadRowsWithoutLeakingContent(t *testing.T) {
 		"delete old doc differs": {Type: pglib.UpdateTypeDelete, Old: map[string]any{"id": "s:other-" + sentinel, "doc": good}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := docSourceUpdate(update)
+			got, err := docSourceUpdate(update, nil)
 
 			require.Error(t, err)
 			assert.Nil(t, got)
@@ -240,7 +240,7 @@ func TestDocSourceUpdateAcceptsDocDecodedLikeTheStream(t *testing.T) {
 	idText, err := encodeID(rv.Type, rv.Value)
 	require.NoError(t, err)
 
-	got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeInsert, New: map[string]any{"id": idText, "doc": doc}})
+	got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeInsert, New: map[string]any{"id": idText, "doc": doc}}, nil)
 
 	require.NoError(t, err)
 	assertDocIDBytes(t, raw, got.Data)
@@ -255,11 +255,11 @@ func TestFillDocsDecodesRowsUpToLimitAndFailsWithoutLeakingContent(t *testing.T)
 		{key: []any{"eu", "s:" + sentinel}, text: "not json " + sentinel},
 	}
 
-	require.NoError(t, fillDocs(rows, keys, 1))
+	require.NoError(t, fillDocs(rows, keys, nil, 1))
 	assert.NotEmpty(t, rows[0].doc)
 	assert.Nil(t, rows[1].doc)
 
-	err := fillDocs(rows, keys, 2)
+	err := fillDocs(rows, keys, nil, 2)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), sentinel)
 }
@@ -268,16 +268,18 @@ func TestFillDocsRejectsDocWithoutIDAndKeysWithoutIDColumn(t *testing.T) {
 	_, text, idText, _ := storedRow(t, "k")
 	noID := sourceRow{key: []any{idText}, text: `{"v":{"$numberInt":"1"}}`}
 
-	require.Error(t, fillDocs([]sourceRow{noID}, []string{"id"}, 1))
-	require.Error(t, fillDocs([]sourceRow{{key: []any{"eu"}, text: text}}, []string{"region"}, 1))
+	require.Error(t, fillDocs([]sourceRow{noID}, []string{"id"}, nil, 1))
+	require.Error(t, fillDocs([]sourceRow{{key: []any{"eu"}, text: text}}, []string{"region"}, nil, 1))
 }
 
 func TestToBsonAdiomUpdateUsesTheDocumentSourceInDocumentMode(t *testing.T) {
 	raw, _, idText, doc := storedRow(t, "key-1")
-	update := pglib.Update{Type: pglib.UpdateTypeInsert, New: map[string]any{"id": idText, "doc": doc}}
+	update := pglib.Update{Namespace: "app", TableName: "items", Type: pglib.UpdateTypeInsert, New: map[string]any{"id": idText, "doc": doc}}
 	c := &conn{settings: PostgresSettings{DocumentMode: true}}
+	_, err := c.moved.get("app.items", func() ([]docColumn, error) { return nil, nil })
+	require.NoError(t, err)
 
-	got, err := c.toBsonAdiomUpdate(update)
+	got, err := c.toBsonAdiomUpdate(t.Context(), update)
 
 	require.NoError(t, err)
 	assert.Equal(t, mongoIDPart(t, "key-1"), got.Id)

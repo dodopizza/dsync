@@ -1,0 +1,56 @@
+//go:build external
+
+package postgres
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+func TestDocumentModeMovesColumnsOutOfDocAndListsTheOriginalDocuments(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, `CREATE TABLE %[1]s.moved (id text NOT NULL, doc jsonb, tenant text NOT NULL, "sortKey" bigint, n integer,
+		ratio double precision, "on" boolean, at timestamptz, uid uuid, bin bytea, value jsonb, kept bigint, amount numeric,
+		PRIMARY KEY (id, tenant));
+		COMMENT ON COLUMN %[1]s.moved.kept IS 'dsync:{"mode":"copy"}'`, f.schema)
+	ns := f.schema + ".moved"
+	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
+	dec, err := bson.ParseDecimal128("1.50")
+	require.NoError(t, err)
+	full := rawDoc(t, bson.D{
+		{Key: "_id", Value: "a"}, {Key: "tenant", Value: "t1"}, {Key: "sortKey", Value: int64(42)}, {Key: "n", Value: int32(7)},
+		{Key: "ratio", Value: 3.0}, {Key: "on", Value: true}, {Key: "at", Value: bson.NewDateTimeFromTime(movedAt)},
+		{Key: "uid", Value: bson.Binary{Subtype: 4, Data: seqBytes(16)}}, {Key: "bin", Value: bson.Binary{Data: []byte{1, 2}}},
+		{Key: "value", Value: bson.D{{Key: "state", Value: int32(2)}, {Key: "payload", Value: bson.A{int64(1), "x"}}}},
+		{Key: "kept", Value: int64(9)}, {Key: "amount", Value: dec}, {Key: "rest", Value: "x"},
+	})
+	sparse := rawDoc(t, bson.D{{Key: "_id", Value: "b"}, {Key: "tenant", Value: "t1"}, {Key: "n", Value: nil}})
+
+	must(t, writeDocs(ctx, c, ns, full, sparse), "write")
+
+	var doc, value, uid string
+	var sortKey int64
+	err = f.pool.QueryRow(ctx, `SELECT doc::text, "sortKey", value::text, uid::text FROM `+ns+` WHERE id = 's:a'`).Scan(&doc, &sortKey, &value, &uid)
+	must(t, err, "read columns")
+	assert.JSONEq(t, `{"_id":"a","tenant":"t1","kept":{"$numberLong":"9"},"amount":{"$numberDecimal":"1.50"},"rest":"x"}`, doc)
+	assert.Equal(t, int64(42), sortKey)
+	assert.JSONEq(t, `{"state":{"$numberInt":"2"},"payload":[{"$numberLong":"1"},"x"]}`, value)
+	assert.Equal(t, "00010203-0405-0607-0809-0a0b0c0d0e0f", uid)
+
+	rows, err := c.listDocRows(ctx, ns, []string{"id", "tenant"}, `"id", "tenant"`, "", nil, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, hashOf(t, full), hashOf(t, rows[0].doc))
+	assert.Equal(t, hashOf(t, sparse), hashOf(t, rows[1].doc))
+
+	_, err = f.admin.Exec(ctx, `UPDATE `+ns+` SET at = '2024-05-06 07:08:09.123987+00' WHERE id = 's:a'`)
+	must(t, err, "set microseconds")
+	c = &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
+	rows, err = c.listDocRows(ctx, ns, []string{"id", "tenant"}, `"id", "tenant"`, "", nil, 10)
+	require.NoError(t, err)
+	assert.Equal(t, movedAt.UnixMilli(), bson.Raw(rows[0].doc).Lookup("at").DateTime())
+}

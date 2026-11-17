@@ -23,7 +23,7 @@ func TestShapeDocTableKeepsSelectedColumnsInOrderWithTypes(t *testing.T) {
 	got, err := shapeDocTable(shapeNamespace, baseColumns(), []string{"id", "Region"})
 
 	require.NoError(t, err)
-	assert.Equal(t, []docColumn{{"Region", "text"}, {"qty", "integer"}}, got.Columns)
+	assert.Equal(t, []docColumn{{Name: "Region", Type: "text"}, {Name: "qty", Type: "integer", Move: true}}, got.Columns)
 	assert.Equal(t, []string{"id", "Region"}, got.PrimaryKey)
 }
 
@@ -37,7 +37,7 @@ func TestShapeDocTableSkipsGeneratedAndAlwaysIdentityButKeepsDefaultIdentity(t *
 	got, err := shapeDocTable(shapeNamespace, columns, []string{"id"})
 
 	require.NoError(t, err)
-	assert.Equal(t, []docColumn{{"Region", "text"}, {"qty", "integer"}, {"byDefault", "bigint"}}, got.Columns)
+	assert.Equal(t, []docColumn{{Name: "Region", Type: "text", Move: true}, {Name: "qty", Type: "integer", Move: true}, {Name: "byDefault", Type: "bigint", Move: true}}, got.Columns)
 }
 
 func TestShapeDocTableRejectsBadShapesNamingTableAndColumn(t *testing.T) {

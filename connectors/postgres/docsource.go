@@ -18,9 +18,10 @@ import (
 )
 
 type sourceRow struct {
-	doc  []byte
-	key  []any
-	text string
+	doc   []byte
+	key   []any
+	text  string
+	moved []any
 }
 
 func docFromText(text string) (bson.Raw, error) {
@@ -97,12 +98,40 @@ func emitDoc(idText string, raw bson.Raw) (bson.Raw, bson.RawValue, error) {
 	return bson.Raw(bsoncore.BuildDocument(nil, out)), colID, nil
 }
 
-func docSourceUpdate(update pglib.Update) (*adiomv1.Update, error) {
+func streamDoc(row map[string]any, moved []docColumn) (bson.Raw, error) {
+	raw, err := docFromValue(row)
+	if err != nil {
+		return nil, err
+	}
+	values := make([]any, len(moved))
+	for i, col := range moved {
+		value, ok := row[col.Name]
+		if !ok {
+			return nil, fmt.Errorf("column %s is not in the replication stream", col.Name)
+		}
+		values[i] = value
+	}
+	return restoreMoved(raw, moved, values)
+}
+
+func (c *conn) movedColumns(ctx context.Context, namespace string) ([]docColumn, error) {
+	return c.moved.get(namespace, func() ([]docColumn, error) {
+		table, err := loadDocTable(ctx, c.c, namespace)
+		if err != nil {
+			return nil, err
+		}
+		return slices.DeleteFunc(table.Columns, func(col docColumn) bool {
+			return !col.Move || col.Name == c.settings.UpdatedAtColumn
+		}), nil
+	})
+}
+
+func docSourceUpdate(update pglib.Update, moved []docColumn) (*adiomv1.Update, error) {
 	ns := update.Namespace + "." + update.TableName
 	switch update.Type {
 	case pglib.UpdateTypeInsert, pglib.UpdateTypeUpdate:
 		idText, _ := update.New[docIDColumn].(string)
-		raw, err := docFromValue(update.New)
+		raw, err := streamDoc(update.New, moved)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", ns, err)
 		}
@@ -172,7 +201,15 @@ func (c *conn) listRows(ctx context.Context, namespace string, keys []string, wh
 }
 
 func (c *conn) listDocRows(ctx context.Context, namespace string, keys []string, primaryKeysPartial, where string, args []any, limit int) ([]sourceRow, error) {
-	q := fmt.Sprintf("SELECT %v::text, %v from %v%v ORDER BY %v LIMIT %v", pgx.Identifier{docDocColumn}.Sanitize(), primaryKeysPartial, SanitizeNamespace(namespace), where, primaryKeysPartial, limit+1)
+	moved, err := c.movedColumns(ctx, namespace)
+	if err != nil {
+		return nil, err
+	}
+	selected := primaryKeysPartial
+	for _, col := range moved {
+		selected += ", " + pgx.Identifier{col.Name}.Sanitize()
+	}
+	q := fmt.Sprintf("SELECT %v::text, %v from %v%v ORDER BY %v LIMIT %v", pgx.Identifier{docDocColumn}.Sanitize(), selected, SanitizeNamespace(namespace), where, primaryKeysPartial, limit+1)
 	rows, err := c.c.Query(ctx, q, args...)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -183,18 +220,18 @@ func (c *conn) listDocRows(ctx context.Context, namespace string, keys []string,
 			return sourceRow{}, err
 		}
 		text, _ := values[0].(string)
-		return sourceRow{key: values[1:], text: text}, nil
+		return sourceRow{key: values[1 : 1+len(keys)], text: text, moved: values[1+len(keys):]}, nil
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if err := fillDocs(result, keys, limit); err != nil {
+	if err := fillDocs(result, keys, moved, limit); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("%s: %w", namespace, err))
 	}
 	return result, nil
 }
 
-func fillDocs(rows []sourceRow, keys []string, limit int) error {
+func fillDocs(rows []sourceRow, keys []string, moved []docColumn, limit int) error {
 	idIndex := slices.Index(keys, docIDColumn)
 	if idIndex < 0 {
 		return fmt.Errorf("primary key has no %s column", docIDColumn)
@@ -206,6 +243,9 @@ func fillDocs(rows []sourceRow, keys []string, limit int) error {
 		idText, _ := rows[i].key[idIndex].(string)
 		raw, err := docFromText(rows[i].text)
 		if err != nil {
+			return err
+		}
+		if raw, err = restoreMoved(raw, moved, rows[i].moved); err != nil {
 			return err
 		}
 		if rows[i].doc, _, err = emitDoc(idText, raw); err != nil {
