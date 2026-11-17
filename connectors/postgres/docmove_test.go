@@ -380,3 +380,52 @@ func TestRestoreMovedTakesJSONBAsTextAndHidesABadValue(t *testing.T) {
 		assert.NotContains(t, err.Error(), marker)
 	}
 }
+
+func TestMovedEmptyValuesAreWrittenAsNonNullArgsAndRestoredOnListAndStream(t *testing.T) {
+	plan := movePlan(t)
+	moved := movedColumnsOf(plan)
+	raw := rawDoc(t, bson.D{
+		{Key: "_id", Value: "k1"},
+		{Key: "Region", Value: "eu"},
+		{Key: "name", Value: ""},
+		{Key: "bin", Value: bson.Binary{Subtype: 0, Data: []byte{}}},
+		{Key: "value", Value: bson.D{}},
+		{Key: "list", Value: bson.A{}},
+	})
+
+	batch, err := docBatchArgs(plan, [][]byte{raw}, time.Time{})
+
+	require.NoError(t, err)
+	args := batch[0].args
+	assert.JSONEq(t, `{"_id":"k1","Region":"eu"}`, string(args[1].([]byte)))
+	for i, col := range plan.columns {
+		switch col.Name {
+		case "name":
+			assert.Equal(t, "", args[2+i])
+		case "bin", "value", "list":
+			got, ok := args[2+i].([]byte)
+			require.True(t, ok, col.Name)
+			assert.NotNil(t, got, col.Name)
+		}
+	}
+
+	text, values := readValues(t, plan, args)
+	rows := []sourceRow{{key: []any{"s:k1", "eu"}, text: text, moved: values}}
+	require.NoError(t, fillDocs(rows, []string{"id", "Region"}, moved, 1))
+	assert.Equal(t, hashOf(t, raw), hashOf(t, rows[0].doc))
+
+	var doc any
+	require.NoError(t, json.Unmarshal([]byte(text), &doc))
+	row := map[string]any{"id": "s:k1", "doc": doc, "Region": "eu"}
+	for i, col := range moved {
+		row[col.Name] = values[i]
+		if text, ok := values[i].(jsonText); ok {
+			var decoded any
+			require.NoError(t, json.Unmarshal([]byte(text), &decoded))
+			row[col.Name] = decoded
+		}
+	}
+	got, err := docSourceUpdate(pglib.Update{Type: pglib.UpdateTypeUpdate, New: row}, moved)
+	require.NoError(t, err)
+	assert.Equal(t, hashOf(t, raw), hashOf(t, got.Data))
+}

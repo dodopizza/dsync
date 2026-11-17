@@ -120,3 +120,32 @@ func TestDocumentModeReplaysAMovedDoubleThatChangedToTheAdjacentValueUnderReduce
 	require.Len(t, rows, 1)
 	assert.Equal(t, hashOf(t, next), hashOf(t, rows[0].doc))
 }
+
+func TestDocumentModeKeepsEmptyValuesInMovedColumnsAsNonNull(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, `CREATE TABLE %s.empties (id text PRIMARY KEY, doc jsonb, bin bytea, s text, obj jsonb, arr jsonb)`, f.schema)
+	ns := f.schema + ".empties"
+	c := &conn{c: f.pool, settings: PostgresSettings{DocumentMode: true}}
+	empty := rawDoc(t, bson.D{
+		{Key: "_id", Value: "a"}, {Key: "bin", Value: bson.Binary{Subtype: 0, Data: []byte{}}}, {Key: "s", Value: ""},
+		{Key: "obj", Value: bson.D{}}, {Key: "arr", Value: bson.A{}},
+	})
+
+	must(t, writeDocs(ctx, c, ns, empty), "write")
+
+	var bin, s, obj, arr bool
+	var doc string
+	err := f.pool.QueryRow(ctx, `SELECT bin IS NOT NULL, s IS NOT NULL, obj IS NOT NULL, arr IS NOT NULL, doc::text FROM `+ns+` WHERE id = 's:a'`).Scan(&bin, &s, &obj, &arr, &doc)
+	must(t, err, "read columns")
+	assert.True(t, bin, "bin")
+	assert.True(t, s, "s")
+	assert.True(t, obj, "obj")
+	assert.True(t, arr, "arr")
+	assert.JSONEq(t, `{"_id":"a"}`, doc)
+
+	rows, err := c.listDocRows(ctx, ns, []string{"id"}, `"id"`, "", nil, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hashOf(t, empty), hashOf(t, rows[0].doc))
+}
