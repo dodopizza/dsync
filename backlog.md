@@ -95,7 +95,7 @@ Run locally in containers so far: connection error texts, state store with wrong
 * The first table-shape loads are serialised by one mutex [#22].
 * The SQL batch connector cannot feed document mode [#22].
 * Without `--updated-at-field` the updated-at column ends at the replay time when the replayed window holds more than one version of a document [#24].
-* Unique and exclusion indexes besides the primary key, on the table or its partitions, are refused before the first write to that table, not at flow start; the check is a second catalog query per table under the plan lock. A unique index that covers every primary key column is refused too, though harmless. Foreign keys and CHECK constraints are not looked at; an index added while dsync runs is not seen until a restart.
+* Unique and exclusion indexes besides the primary key, on the table or its partitions, are refused before the first write to that table, not at flow start; the check is a second catalog query per table under the plan lock. A unique index whose key columns, not INCLUDE columns, contain every primary key column is refused too, though harmless. Foreign keys and CHECK constraints are not looked at; an index added while dsync runs is not seen until a restart.
 
 ### Column mode and PostgreSQL as a source
 
