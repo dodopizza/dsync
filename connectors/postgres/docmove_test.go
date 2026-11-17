@@ -310,3 +310,18 @@ func TestDocSourceUpdateRejectsARowWithoutAMovedColumn(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, deleted.Id)
 }
+
+func TestDocBatchArgsKeepsAFieldNamedLikeTheUpdatedAtColumnInDoc(t *testing.T) {
+	settings := PostgresSettings{UpdatedAtColumn: "at"}
+	plan, err := buildDocPlan("app.items", docTable{
+		Columns:    []docColumn{{Name: "at", Type: typeTimeTZ, Move: true}, {Name: "n", Type: "integer", Move: true}},
+		PrimaryKey: []string{docIDColumn},
+	}, settings)
+	require.NoError(t, err)
+	doc := rawDoc(t, bson.D{{Key: "_id", Value: "k1"}, {Key: "at", Value: "text"}, {Key: "n", Value: int32(7)}})
+
+	batch, err := docBatchArgs(plan, [][]byte{doc}, movedAt)
+
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"_id":"k1","at":"text"}`, string(batch[0].args[1].([]byte)))
+}

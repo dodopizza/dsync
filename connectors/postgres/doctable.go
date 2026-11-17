@@ -18,7 +18,9 @@ const (
 	docColumnsSQL  = `SELECT a.attname, pg_catalog.format_type(a.atttypid, NULL), a.attgenerated <> '', a.attidentity::text,
 	CASE WHEN array_position(i.indkey::int2[], a.attnum) < i.indnkeyatts THEN array_position(i.indkey::int2[], a.attnum) + 1 ELSE 0 END::int,
 	COALESCE(NOT i.indimmediate, false), COALESCE(con.conname, ''),
-	COALESCE(pg_catalog.col_description(a.attrelid, a.attnum), ''), a.atttypmod <> -1
+	COALESCE((SELECT pg_catalog.col_description(r.attrelid, r.attnum) FROM pg_catalog.pg_attribute r
+		WHERE r.attrelid = pg_catalog.pg_partition_root(a.attrelid) AND r.attname = a.attname AND NOT r.attisdropped),
+		pg_catalog.col_description(a.attrelid, a.attnum), ''), a.atttypmod <> -1
 FROM pg_catalog.pg_attribute a
 LEFT JOIN pg_catalog.pg_index i ON i.indrelid = a.attrelid AND i.indisprimary
 LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid AND con.contype = 'p'

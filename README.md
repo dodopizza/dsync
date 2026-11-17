@@ -129,7 +129,7 @@ Rules of move mode:
 * A row is read back only when `doc` is not null and no moved column repeats a non-null field of `doc`. Rows written by a dsync version without move mode hold such repeats: rerun the copy before reading the table back.
 * Every column in move mode is read back as a document field. Give columns that the service owns a `copy` comment, and pass the same `--updated-at-column` to the reading side.
 * With PostgreSQL as a streaming source the table needs `REPLICA IDENTITY FULL` when moved values are large enough to be stored out of line.
-* A column comment does not pass from a partitioned table to its partitions, and the stream names the partition. Repeat the comment on every partition.
+* On a partitioned table the comment of the parent's column applies to every partition; a partition's own comment counts only when the parent's column has none.
 * The modes are read once per table and connection; a comment changed while dsync runs is not seen until a restart.
 
 Rows whose `doc` still holds fields besides `_id` and the key columns (here `tenant`) can be counted with:

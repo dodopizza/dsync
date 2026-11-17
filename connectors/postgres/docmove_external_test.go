@@ -54,3 +54,28 @@ func TestDocumentModeMovesColumnsOutOfDocAndListsTheOriginalDocuments(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, movedAt.UnixMilli(), bson.Raw(rows[0].doc).Lookup("at").DateTime())
 }
+
+func TestDocumentModeTakesTheMappingCommentOfAPartitionFromItsParent(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, `CREATE TABLE %[1]s.parted (id text, region text, doc jsonb, n integer, own integer, PRIMARY KEY (id, region)) PARTITION BY LIST (region);
+		CREATE TABLE %[1]s.parted_eu (own integer, doc jsonb, n integer, region text NOT NULL, id text NOT NULL);
+		ALTER TABLE %[1]s.parted ATTACH PARTITION %[1]s.parted_eu FOR VALUES IN ('eu');
+		COMMENT ON COLUMN %[1]s.parted.n IS 'dsync:{"mode":"copy"}';
+		COMMENT ON COLUMN %[1]s.parted_eu.own IS 'dsync:{"mode":"copy"}'`, f.schema)
+
+	parent, err := loadDocTable(ctx, f.pool, f.schema+".parted")
+	require.NoError(t, err)
+	partition, err := loadDocTable(ctx, f.pool, f.schema+".parted_eu")
+	require.NoError(t, err)
+
+	moves := func(table docTable) map[string]bool {
+		got := map[string]bool{}
+		for _, col := range table.Columns {
+			got[col.Name] = col.Move
+		}
+		return got
+	}
+	assert.Equal(t, map[string]bool{"region": false, "n": false, "own": true}, moves(parent))
+	assert.Equal(t, map[string]bool{"region": false, "n": false, "own": false}, moves(partition))
+}
