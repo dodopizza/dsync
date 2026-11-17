@@ -312,6 +312,9 @@ func (c *conn) docPlanFor(ctx context.Context, namespace string) (*docPlan, erro
 		if err != nil {
 			return nil, err
 		}
+		if err := refuseUniqueIndexes(ctx, c.c, namespace); err != nil {
+			return nil, err
+		}
 		return buildDocPlan(namespace, table, c.settings)
 	})
 }
