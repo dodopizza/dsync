@@ -227,3 +227,19 @@ func TestRefuseUniqueIndexesNamesTheIndexAndAllowsPlainOnes(t *testing.T) {
 		assert.Contains(t, err.Error(), index)
 	}
 }
+
+func TestRefuseUniqueIndexesListsEveryIndexIncludingThoseOfPartitions(t *testing.T) {
+	ctx := testContext(t)
+	f := newDocFixture(ctx, t)
+	f.exec(ctx, t, "CREATE TABLE %s.parted (id text, region text, doc jsonb, note text, PRIMARY KEY (id, region)) PARTITION BY LIST (region)", f.schema)
+	f.exec(ctx, t, "CREATE TABLE %s.parted_eu PARTITION OF %s.parted FOR VALUES IN ('eu')", f.schema, f.schema)
+	f.exec(ctx, t, "CREATE TABLE %s.parted_us PARTITION OF %s.parted FOR VALUES IN ('us')", f.schema, f.schema)
+	require.NoError(t, refuseUniqueIndexes(ctx, f.pool, f.schema+".parted"))
+
+	f.exec(ctx, t, "CREATE UNIQUE INDEX leaf_note ON %s.parted_us (note)", f.schema)
+	f.exec(ctx, t, "ALTER TABLE %s.parted_eu ADD CONSTRAINT leaf_excluded EXCLUDE USING btree (note WITH =)", f.schema)
+	err := refuseUniqueIndexes(ctx, f.pool, f.schema+".parted")
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	assert.Contains(t, err.Error(), "unique or exclusion indexes leaf_excluded, leaf_note")
+}

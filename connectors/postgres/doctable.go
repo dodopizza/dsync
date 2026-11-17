@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -24,12 +23,11 @@ LEFT JOIN pg_catalog.pg_index i ON i.indrelid = a.attrelid AND i.indisprimary
 LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid AND con.contype = 'p'
 WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum`
-	docUniqueIndexSQL = `SELECT c.relname
+	docUniqueIndexSQL = `SELECT COALESCE(string_agg(c.relname, ', ' ORDER BY c.relname), '')
 FROM pg_catalog.pg_index i
 JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
-WHERE i.indrelid = to_regclass($1) AND NOT i.indisprimary AND (i.indisunique OR i.indisexclusion)
-ORDER BY c.relname
-LIMIT 1`
+WHERE (i.indrelid = to_regclass($1) OR i.indrelid IN (SELECT relid FROM pg_catalog.pg_partition_tree(to_regclass($1))))
+	AND NOT i.indisprimary AND (i.indisunique OR i.indisexclusion)`
 )
 
 type docColumn struct {
@@ -138,13 +136,12 @@ func primaryKeyOf(columns []catalogColumn) []string {
 }
 
 func refuseUniqueIndexes(ctx context.Context, c *pgxpool.Pool, namespace string) error {
-	var index string
-	err := c.QueryRow(ctx, docUniqueIndexSQL, SanitizeNamespace(namespace)).Scan(&index)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
+	var indexes string
+	if err := c.QueryRow(ctx, docUniqueIndexSQL, SanitizeNamespace(namespace)).Scan(&indexes); err != nil {
 		return toConnectError(err)
 	}
-	return shapeError(namespace, "index %s is unique: until the transfer ends a document-mode destination table may have no unique or exclusion index besides the primary key", index)
+	if indexes == "" {
+		return nil
+	}
+	return shapeError(namespace, "unique or exclusion indexes %s: until the transfer ends a document-mode destination table and its partitions may have none besides the primary key", indexes)
 }
