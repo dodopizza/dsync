@@ -74,7 +74,7 @@ func TestCreateReplicationUrlAcceptsOnlyPostgresSchemes(t *testing.T) {
 }
 
 func TestCreateReplicationUrlFixesTheTextOutputOfStreamedValues(t *testing.T) {
-	got, err := createReplicationUrl("postgres://u@127.0.0.1:1/d?extra_float_digits=0&sslmode=disable")
+	got, err := createReplicationUrl("postgres://u@127.0.0.1:1/d?extra_float_digits=0&EXTRA_FLOAT_DIGITS=0&DateStyle=German&replication=false&sslmode=disable")
 	require.NoError(t, err)
 	parsed, err := url.Parse(got)
 	require.NoError(t, err)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"regexp"
 	"slices"
@@ -1279,7 +1280,7 @@ func validSlotName(name string) bool {
 	return slotNamePattern.MatchString(name)
 }
 
-var streamTextOutput = map[string]string{"extra_float_digits": "3", "datestyle": "ISO", "intervalstyle": "postgres", "bytea_output": "hex"}
+var replicationParams = map[string]string{"replication": "database", "extra_float_digits": "3", "datestyle": "ISO", "intervalstyle": "postgres", "bytea_output": "hex"}
 
 func createReplicationUrl(urlString string) (string, error) {
 	parsed, err := url.Parse(urlString)
@@ -1287,8 +1288,11 @@ func createReplicationUrl(urlString string) (string, error) {
 		return "", errors.New("invalid postgres connection string")
 	}
 	query := parsed.Query()
-	query.Set("replication", "database")
-	for name, value := range streamTextOutput {
+	maps.DeleteFunc(query, func(name string, _ []string) bool {
+		_, forced := replicationParams[strings.ToLower(name)]
+		return forced
+	})
+	for name, value := range replicationParams {
 		query.Set(name, value)
 	}
 	parsed.RawQuery = query.Encode()
