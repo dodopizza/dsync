@@ -174,10 +174,22 @@ func extractShardKeyFields(collectionInfo bson.Raw) ([]string, error) {
 	return fields, nil
 }
 
+// A dotted shard key is a path: Cosmos looks for it in nested documents, not in a top-level field named after the
+// whole path, and rejects the insert for the missing key before it checks whether the key may write at all.
 func makeDummyDocument(shardKeyFields []string) bson.M {
 	document := make(bson.M, len(shardKeyFields))
 	for _, field := range shardKeyFields {
-		document[field] = ""
+		parts := strings.Split(field, ".")
+		node := document
+		for _, part := range parts[:len(parts)-1] {
+			child, ok := node[part].(bson.M)
+			if !ok {
+				child = bson.M{}
+				node[part] = child
+			}
+			node = child
+		}
+		node[parts[len(parts)-1]] = ""
 	}
 	return document
 }
@@ -186,9 +198,22 @@ func makeDummyDeleteFilter(id interface{}, document bson.M, shardKeyFields []str
 	filter := make(bson.M, len(shardKeyFields)+1)
 	filter["_id"] = id
 	for _, field := range shardKeyFields {
-		filter[field] = document[field]
+		filter[field] = valueAtPath(document, field)
 	}
 	return filter
+}
+
+func valueAtPath(document bson.M, path string) interface{} {
+	parts := strings.Split(path, ".")
+	node := document
+	for _, part := range parts[:len(parts)-1] {
+		child, ok := node[part].(bson.M)
+		if !ok {
+			return nil
+		}
+		node = child
+	}
+	return node[parts[len(parts)-1]]
 }
 
 func isUnauthorizedWrite(err error) bool {
