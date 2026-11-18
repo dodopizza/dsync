@@ -178,7 +178,7 @@ func TestShardKeyDefinitionAndDummyFilters(t *testing.T) {
 	document := makeDummyDocument(fields)
 	require.Equal(t, bson.M{"partitionKey": "", "tenant": ""}, document)
 
-	filter := makeDummyDeleteFilter("dummy-id", document, fields)
+	filter := makeDummyDeleteFilter("dummy-id", fields)
 	require.Equal(t, bson.M{"_id": "dummy-id", "partitionKey": "", "tenant": ""}, filter)
 }
 
@@ -197,7 +197,7 @@ func TestDummyDocumentNestsDottedShardKey(t *testing.T) {
 	document := makeDummyDocument(fields)
 	require.Equal(t, bson.M{"SystemData": bson.M{"ShardKey": ""}}, document)
 
-	filter := makeDummyDeleteFilter("dummy-id", document, fields)
+	filter := makeDummyDeleteFilter("dummy-id", fields)
 	require.Equal(t, bson.M{"_id": "dummy-id", "SystemData.ShardKey": ""}, filter)
 }
 

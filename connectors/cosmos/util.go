@@ -75,7 +75,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 		return nil, fmt.Errorf("failed to insert dummy record: %w", err)
 	}
 
-	deleteFilter := makeDummyDeleteFilter(result.InsertedID, dummyInsertFilter, shardKeyFields)
+	deleteFilter := makeDummyDeleteFilter(result.InsertedID, shardKeyFields)
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
@@ -194,26 +194,13 @@ func makeDummyDocument(shardKeyFields []string) bson.M {
 	return document
 }
 
-func makeDummyDeleteFilter(id interface{}, document bson.M, shardKeyFields []string) bson.M {
+func makeDummyDeleteFilter(id any, shardKeyFields []string) bson.M {
 	filter := make(bson.M, len(shardKeyFields)+1)
 	filter["_id"] = id
 	for _, field := range shardKeyFields {
-		filter[field] = valueAtPath(document, field)
+		filter[field] = ""
 	}
 	return filter
-}
-
-func valueAtPath(document bson.M, path string) interface{} {
-	parts := strings.Split(path, ".")
-	node := document
-	for _, part := range parts[:len(parts)-1] {
-		child, ok := node[part].(bson.M)
-		if !ok {
-			return nil
-		}
-		node = child
-	}
-	return node[parts[len(parts)-1]]
 }
 
 func isUnauthorizedWrite(err error) bool {
