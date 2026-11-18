@@ -75,7 +75,7 @@ func getLatestResumeToken(ctx context.Context, client *mongo.Client, location if
 		return nil, fmt.Errorf("failed to insert dummy record: %w", err)
 	}
 
-	deleteFilter := makeDummyDeleteFilter(result.InsertedID, dummyInsertFilter, shardKeyFields)
+	deleteFilter := makeDummyDeleteFilter(result.InsertedID, shardKeyFields)
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
@@ -174,19 +174,31 @@ func extractShardKeyFields(collectionInfo bson.Raw) ([]string, error) {
 	return fields, nil
 }
 
+// A dotted shard key is a path: Cosmos looks for it in nested documents, not in a top-level field named after the
+// whole path, and rejects the insert for the missing key before it checks whether the key may write at all.
 func makeDummyDocument(shardKeyFields []string) bson.M {
 	document := make(bson.M, len(shardKeyFields))
 	for _, field := range shardKeyFields {
-		document[field] = ""
+		parts := strings.Split(field, ".")
+		node := document
+		for _, part := range parts[:len(parts)-1] {
+			child, ok := node[part].(bson.M)
+			if !ok {
+				child = bson.M{}
+				node[part] = child
+			}
+			node = child
+		}
+		node[parts[len(parts)-1]] = ""
 	}
 	return document
 }
 
-func makeDummyDeleteFilter(id interface{}, document bson.M, shardKeyFields []string) bson.M {
+func makeDummyDeleteFilter(id any, shardKeyFields []string) bson.M {
 	filter := make(bson.M, len(shardKeyFields)+1)
 	filter["_id"] = id
 	for _, field := range shardKeyFields {
-		filter[field] = document[field]
+		filter[field] = ""
 	}
 	return filter
 }
