@@ -182,6 +182,30 @@ func TestShardKeyDefinitionAndDummyFilters(t *testing.T) {
 	require.Equal(t, bson.M{"_id": "dummy-id", "partitionKey": "", "tenant": ""}, filter)
 }
 
+// Cosmos reads a dotted shard key as a path: a top-level field named "SystemData.ShardKey" does not carry it, and the
+// insert fails with "document does not contain shard key" instead of the unauthorized error a read-only key relies on.
+func TestDummyDocumentNestsDottedShardKey(t *testing.T) {
+	collectionInfo := mustMarshalBSON(t, bson.D{
+		{Key: "id", Value: "collectionRid"},
+		{Key: "shardKeyDefinition", Value: bson.D{{Key: "SystemData.ShardKey", Value: "Hash"}}},
+	})
+
+	fields, err := extractShardKeyFields(collectionInfo)
+	require.NoError(t, err)
+	require.Equal(t, []string{"SystemData.ShardKey"}, fields)
+
+	document := makeDummyDocument(fields)
+	require.Equal(t, bson.M{"SystemData": bson.M{"ShardKey": ""}}, document)
+
+	filter := makeDummyDeleteFilter("dummy-id", document, fields)
+	require.Equal(t, bson.M{"_id": "dummy-id", "SystemData.ShardKey": ""}, filter)
+}
+
+func TestDummyDocumentKeepsShardKeysUnderOneParent(t *testing.T) {
+	fields := []string{"a.b", "a.c", "top"}
+	require.Equal(t, bson.M{"a": bson.M{"b": "", "c": ""}, "top": ""}, makeDummyDocument(fields))
+}
+
 func TestTokenMapRoundTrip(t *testing.T) {
 	original := NewTokenMap()
 	original.AddToken(iface.Location{Database: "db", Collection: "col"}, bson.Raw{5, 0, 0, 0, 0})
