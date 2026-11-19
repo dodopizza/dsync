@@ -1020,8 +1020,8 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 	if res != nil && res.UpsertedCount > 0 {
 		slog.Error(fmt.Sprintf("Overwrite inserted %d documents instead of replacing duplicates in %v (shard key mismatch?): %v", res.UpsertedCount, collection.Name(), slices.Collect(maps.Values(res.UpsertedIDs))[:min(10, len(res.UpsertedIDs))]))
 	}
-	if replaceErr != nil && deleteUniqueConflicts {
-		replaceErr = retryAfterDeletingStaleUniqueHolders(ctx, collection, replacements, false, replaceErr)
+	if replaceErr != nil {
+		replaceErr = retryAfterDeletingStaleHolders(ctx, collection, replacements, false, deleteUniqueConflicts, replaceErr)
 	}
 	if replaceErr == nil {
 		return failures, nil
@@ -1440,60 +1440,63 @@ type uniqueConflict struct {
 	indexName    string
 }
 
-// retryAfterDeletingStaleUniqueHolders handles a bulk write that failed only
-// because other destination documents hold unique key values its documents
-// need. The source enforces the same unique index, so it no longer has those
-// documents: each one is deleted and the failed writes run once more. Any
-// other failure is returned unchanged, and a failed retry is returned with its
-// write error indexes pointing into models.
-func retryAfterDeletingStaleUniqueHolders(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, writeErr error) error {
+// retryAfterDeletingStaleHolders retries bulk writes that failed on documents
+// the destination still holds, in two shapes: a secondary unique index value
+// owned by a document the source no longer has (only with
+// deleteUniqueConflicts — an index policy decision), and an _id held by a
+// stale copy of a document whose shard key changed in the source, which an
+// extended-key upsert no longer matches (always retried: the source cannot
+// hold two documents with one _id, so this restores a write it already made).
+// Any other failure is returned unchanged, and a failed retry is returned
+// with its write error indexes pointing into models.
+func retryAfterDeletingStaleHolders(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, deleteUniqueConflicts bool, writeErr error) error {
 	bulkErr, ok := errors.AsType[mongo.BulkWriteException](writeErr)
 	if !ok || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
 		return writeErr
 	}
 	conflicts := make([]uniqueConflict, 0, len(bulkErr.WriteErrors))
+	uniqueIndexConflicts := false
 	for _, we := range bulkErr.WriteErrors {
-		conflict, ok := uniqueConflictFrom(we, models)
+		conflict, isUniqueIndex, ok := staleHolderConflict(we, models)
 		if !ok {
 			return writeErr
 		}
+		uniqueIndexConflicts = uniqueIndexConflicts || isUniqueIndex
 		conflicts = append(conflicts, conflict)
 	}
-	ns := col.Database().Name() + "." + col.Name()
-	indexNames, err := plainUniqueIndexNames(ctx, col)
-	if err != nil {
-		slog.Error(fmt.Sprintf("Failed to list indexes of %v to resolve a unique index conflict: %v", ns, err))
-		return writeErr
-	}
-	for i := range conflicts {
-		if conflicts[i].indexName, ok = indexNames[string(conflicts[i].keyPattern)]; !ok {
+	if uniqueIndexConflicts {
+		if !deleteUniqueConflicts {
 			return writeErr
+		}
+		ns := col.Database().Name() + "." + col.Name()
+		indexNames, err := plainUniqueIndexNames(ctx, col)
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to list indexes of %v to resolve a unique index conflict: %v", ns, err))
+			return writeErr
+		}
+		for i := range conflicts {
+			if conflicts[i].keyPattern == nil {
+				continue
+			}
+			if conflicts[i].indexName, ok = indexNames[string(conflicts[i].keyPattern)]; !ok {
+				return writeErr
+			}
 		}
 	}
 	return deleteHoldersAndRetry(ctx, col, models, ordered, conflicts, writeErr)
 }
 
-// retryAfterDeletingStaleIDHolders handles a bulk write that failed because an
-// upsert with an extended key filter (full document key) targeted a document
-// whose shard key changed in the source: the filter no longer matches the
-// stale copy holding the _id, so the insert path fails on _id. The source
-// cannot hold two documents with one _id, so the holder is deleted and the
-// failed writes run once more. Unlike the unique-index retry this is not an
-// index policy decision and is not gated on DeleteUniqueConflicts.
-func retryAfterDeletingStaleIDHolders(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, writeErr error) error {
-	bulkErr, ok := errors.AsType[mongo.BulkWriteException](writeErr)
-	if !ok || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
-		return writeErr
+// staleHolderConflict classifies one duplicate-key write error: either a
+// conflict on a secondary unique index, or a stale _id holder behind an
+// upsert whose filter carries more than _id alone.
+func staleHolderConflict(we mongo.BulkWriteError, models []mongo.WriteModel) (uniqueConflict, bool, bool) {
+	if conflict, ok := uniqueConflictFrom(we, models); ok {
+		return conflict, true, true
 	}
-	conflicts := make([]uniqueConflict, 0, len(bulkErr.WriteErrors))
-	for _, we := range bulkErr.WriteErrors {
-		conflict, ok := idHolderConflictFrom(we, models)
-		if !ok {
-			return writeErr
-		}
-		conflicts = append(conflicts, conflict)
+	if conflict, ok := idHolderConflictFrom(we, models); ok {
+		return conflict, false, true
 	}
-	return deleteHoldersAndRetry(ctx, col, models, ordered, conflicts, writeErr)
+	return uniqueConflict{}, false, false
 }
 
 // idHolderConflictFrom matches a duplicate-key error on the _id index of a
@@ -1670,10 +1673,7 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 	}
 	_, err = col.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(ordered))
 	if err != nil {
-		err = retryAfterDeletingStaleIDHolders(ctx, col, models, ordered, err)
-	}
-	if err != nil && c.settings.DeleteUniqueConflicts {
-		err = retryAfterDeletingStaleUniqueHolders(ctx, col, models, ordered, err)
+		err = retryAfterDeletingStaleHolders(ctx, col, models, ordered, c.settings.DeleteUniqueConflicts, err)
 	}
 	if err != nil {
 		if r.Msg.GetPartialWriteResults() {
