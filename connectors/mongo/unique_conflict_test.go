@@ -184,6 +184,46 @@ func TestWriteUpdatesRetriesEvenWhenNoStaleHolderIsLeft(t *testing.T) {
 	require.Equal(t, conflictRetried, commandNames(*commands))
 }
 
+var idRetried = []string{"update", "findAndModify", "update"}
+
+func extendedKeyUpdate(t *testing.T, id string, partition int) *adiomv1.Update {
+	return &adiomv1.Update{
+		Id:   []*adiomv1.BsonValue{bsonID(t, "_id", id), bsonID(t, "PartitionId", partition)},
+		Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT,
+		Data: mustMarshal(t, bson.M{"_id": id, "PartitionId": partition}),
+	}
+}
+
+func idConflict(index int, id string) bson.D {
+	return duplicateKey(index, "_id_", `{ _id: "`+id+`" }`, idIndexKey, bson.D{{Key: "_id", Value: id}})
+}
+
+func TestWriteUpdatesReplacesStaleShardKeyHolderWithoutTheFlag(t *testing.T) {
+	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
+		failedWriteReply(idConflict(0, "fresh")), staleHolderReply("fresh"), writeOKReply)
+
+	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11))
+
+	require.NoError(t, err)
+	require.Equal(t, idRetried, commandNames(*commands))
+	deletion := (*commands)[1]
+	require.Equal(t, "findAndModify", deletion.name)
+	require.True(t, deletion.command.Lookup("remove").Boolean())
+	want := mustMarshal(t, bson.D{{Key: "_id", Value: "fresh"}})
+	require.Equal(t, bson.Raw(want), deletion.command.Lookup("query").Document())
+}
+
+func TestWriteUpdatesKeepsIDConflictForPlainIDFilterWithFullKey(t *testing.T) {
+	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
+		failedWriteReply(idConflict(0, "fresh")))
+
+	_, err := writeUpdates(c, false, insertU(t, "fresh", bson.M{"_id": "fresh"}))
+
+	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+	require.ErrorContains(t, err, "E11000")
+	require.Equal(t, []string{"update"}, commandNames(*commands))
+}
+
 func TestWriteUpdatesDeletesNothingForOtherFailures(t *testing.T) {
 	for name, test := range map[string]struct {
 		responses []bson.D
