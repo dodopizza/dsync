@@ -1440,6 +1440,11 @@ type uniqueConflict struct {
 	indexName    string
 }
 
+// idHolderRetryCycles bounds how many times a stale _id holder is deleted and
+// the write retried before giving up: a concurrent writer of the same _id can
+// race the retry, and the window is milliseconds, so a few cycles suffice.
+const idHolderRetryCycles = 3
+
 // retryAfterDeletingStaleUniqueHolders handles a bulk write that failed only
 // because other destination documents hold unique key values its documents
 // need. The source enforces the same unique index, so it no longer has those
@@ -1479,21 +1484,41 @@ func retryAfterDeletingStaleUniqueHolders(ctx context.Context, col *mongo.Collec
 // stale copy holding the _id, so the insert path fails on _id. The source
 // cannot hold two documents with one _id, so the holder is deleted and the
 // failed writes run once more. Unlike the unique-index retry this is not an
-// index policy decision and is not gated on DeleteUniqueConflicts.
+// index policy decision and is not gated on DeleteUniqueConflicts. A
+// concurrent writer may re-insert the same _id between the delete and the
+// retry, so the cycle repeats a bounded number of times with a pause.
 func retryAfterDeletingStaleIDHolders(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, writeErr error) error {
-	bulkErr, ok := errors.AsType[mongo.BulkWriteException](writeErr)
-	if !ok || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
-		return writeErr
-	}
-	conflicts := make([]uniqueConflict, 0, len(bulkErr.WriteErrors))
-	for _, we := range bulkErr.WriteErrors {
-		conflict, ok := idHolderConflictFrom(we, models)
-		if !ok {
+	for cycle := 0; ; cycle++ {
+		bulkErr, ok := errors.AsType[mongo.BulkWriteException](writeErr)
+		if !ok || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
 			return writeErr
 		}
-		conflicts = append(conflicts, conflict)
+		conflicts := make([]uniqueConflict, 0, len(bulkErr.WriteErrors))
+		for _, we := range bulkErr.WriteErrors {
+			conflict, ok := idHolderConflictFrom(we, models)
+			if !ok {
+				return writeErr
+			}
+			conflicts = append(conflicts, conflict)
+		}
+		if cycle > 0 {
+			slog.Warn(fmt.Sprintf("Conflict on _id_ in %v.%v persisted after retry %d, trying again", col.Database().Name(), col.Name(), cycle))
+			pause := time.Duration(cycle) * 200 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(pause):
+			}
+		}
+		err := deleteHoldersAndRetry(ctx, col, models, ordered, conflicts, writeErr)
+		if err == nil {
+			return nil
+		}
+		if cycle == idHolderRetryCycles-1 {
+			return err
+		}
+		writeErr = err
 	}
-	return deleteHoldersAndRetry(ctx, col, models, ordered, conflicts, writeErr)
 }
 
 // idHolderConflictFrom matches a duplicate-key error on the _id index of a

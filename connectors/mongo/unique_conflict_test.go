@@ -224,6 +224,32 @@ func TestWriteUpdatesKeepsIDConflictForPlainIDFilterWithFullKey(t *testing.T) {
 	require.Equal(t, []string{"update"}, commandNames(*commands))
 }
 
+func TestWriteUpdatesRetriesIDHolderWhenTheRetryRaces(t *testing.T) {
+	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
+		failedWriteReply(idConflict(0, "fresh")), staleHolderReply("fresh"),
+		failedWriteReply(idConflict(0, "fresh")), staleHolderReply("fresh"), writeOKReply)
+
+	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"update", "findAndModify", "update", "findAndModify", "update"}, commandNames(*commands))
+}
+
+func TestWriteUpdatesGivesUpOnIDHolderAfterBoundedRetries(t *testing.T) {
+	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
+		failedWriteReply(idConflict(0, "fresh")),
+		staleHolderReply("fresh"), failedWriteReply(idConflict(0, "fresh")),
+		staleHolderReply("fresh"), failedWriteReply(idConflict(0, "fresh")),
+		staleHolderReply("fresh"), failedWriteReply(idConflict(0, "fresh")))
+
+	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11))
+
+	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+	require.ErrorContains(t, err, "E11000")
+	want := []string{"update", "findAndModify", "update", "findAndModify", "update", "findAndModify", "update"}
+	require.Equal(t, want, commandNames(*commands))
+}
+
 func TestWriteUpdatesDeletesNothingForOtherFailures(t *testing.T) {
 	for name, test := range map[string]struct {
 		responses []bson.D
