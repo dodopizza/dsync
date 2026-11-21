@@ -1440,6 +1440,11 @@ type uniqueConflict struct {
 	indexName    string
 }
 
+// idHolderRetryCycles bounds how many times a stale _id holder is deleted and
+// the write retried before giving up: a concurrent writer of the same _id can
+// race the retry, and the window is milliseconds, so a few cycles suffice.
+const idHolderRetryCycles = 3
+
 // retryAfterDeletingStaleUniqueHolders handles a bulk write that failed only
 // because other destination documents hold unique key values its documents
 // need. The source enforces the same unique index, so it no longer has those
@@ -1470,7 +1475,90 @@ func retryAfterDeletingStaleUniqueHolders(ctx context.Context, col *mongo.Collec
 			return writeErr
 		}
 	}
+	return deleteHoldersAndRetry(ctx, col, models, ordered, conflicts, writeErr)
+}
 
+// retryAfterDeletingStaleIDHolders handles a bulk write that failed because an
+// upsert with an extended key filter (full document key) targeted a document
+// whose shard key changed in the source: the filter no longer matches the
+// stale copy holding the _id, so the insert path fails on _id. The source
+// cannot hold two documents with one _id, so the holder is deleted and the
+// failed writes run once more. Unlike the unique-index retry this is not an
+// index policy decision and is not gated on DeleteUniqueConflicts. A
+// concurrent writer may re-insert the same _id between the delete and the
+// retry, so the cycle repeats a bounded number of times with a pause.
+func retryAfterDeletingStaleIDHolders(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, writeErr error) error {
+	for cycle := 0; ; cycle++ {
+		bulkErr, ok := errors.AsType[mongo.BulkWriteException](writeErr)
+		if !ok || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
+			return writeErr
+		}
+		conflicts := make([]uniqueConflict, 0, len(bulkErr.WriteErrors))
+		for _, we := range bulkErr.WriteErrors {
+			conflict, ok := idHolderConflictFrom(we, models)
+			if !ok {
+				return writeErr
+			}
+			conflicts = append(conflicts, conflict)
+		}
+		if cycle > 0 {
+			slog.Warn(fmt.Sprintf("Conflict on _id_ in %v.%v persisted after retry %d, trying again", col.Database().Name(), col.Name(), cycle))
+			pause := time.Duration(cycle) * 200 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(pause):
+			}
+		}
+		err := deleteHoldersAndRetry(ctx, col, models, ordered, conflicts, writeErr)
+		if err == nil {
+			return nil
+		}
+		if cycle == idHolderRetryCycles-1 {
+			return err
+		}
+		writeErr = err
+	}
+}
+
+// idHolderConflictFrom matches a duplicate-key error on the _id index of a
+// write whose filter carries more than _id alone. With a plain _id filter an
+// upsert updates the holder instead of inserting, so an _id conflict there is
+// not a stale holder and is not matched.
+func idHolderConflictFrom(we mongo.BulkWriteError, models []mongo.WriteModel) (uniqueConflict, bool) {
+	if !mongo.IsDuplicateKeyError(we) || we.Index < 0 || we.Index >= len(models) {
+		return uniqueConflict{}, false
+	}
+	keyPattern, ok := we.Raw.Lookup("keyPattern").DocumentOK()
+	if !ok {
+		return uniqueConflict{}, false
+	}
+	elements, err := keyPattern.Elements()
+	if err != nil || len(elements) != 1 || elements[0].Key() != "_id" {
+		return uniqueConflict{}, false
+	}
+	var filter any
+	switch model := models[we.Index].(type) {
+	case *mongo.ReplaceOneModel:
+		filter = model.Filter
+	case *mongo.UpdateOneModel:
+		filter = model.Filter
+	}
+	idFilter, _ := filter.(bson.D)
+	idIndex := slices.IndexFunc(idFilter, func(e bson.E) bool { return e.Key == "_id" })
+	if idIndex < 0 || len(idFilter) < 2 {
+		return uniqueConflict{}, false
+	}
+	return uniqueConflict{
+		position:     we.Index,
+		newID:        idFilter[idIndex].Value,
+		holderFilter: bson.D{{Key: "_id", Value: idFilter[idIndex].Value}},
+		indexName:    "_id_",
+	}, true
+}
+
+func deleteHoldersAndRetry(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, conflicts []uniqueConflict, writeErr error) error {
+	ns := col.Database().Name() + "." + col.Name()
 	positions := make([]int, 0, len(conflicts))
 	for _, conflict := range conflicts {
 		projection := options.FindOneAndDelete().SetProjection(bson.D{{Key: "_id", Value: 1}})
@@ -1606,6 +1694,9 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		models[i] = model.model
 	}
 	_, err = col.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(ordered))
+	if err != nil {
+		err = retryAfterDeletingStaleIDHolders(ctx, col, models, ordered, err)
+	}
 	if err != nil && c.settings.DeleteUniqueConflicts {
 		err = retryAfterDeletingStaleUniqueHolders(ctx, col, models, ordered, err)
 	}
