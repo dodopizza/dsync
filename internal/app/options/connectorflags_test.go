@@ -30,6 +30,11 @@ func TestDeleteUniqueConflictsIsOffUnlessRequested(t *testing.T) {
 	require.True(t, mongoSettingsFor(t, "--delete-unique-conflicts").DeleteUniqueConflicts)
 }
 
+func TestReplaceIDConflictsIsOffUnlessRequested(t *testing.T) {
+	require.False(t, mongoSettingsFor(t).ReplaceIDConflicts)
+	require.True(t, mongoSettingsFor(t, "--replace-id-conflicts").ReplaceIDConflicts)
+}
+
 func createRegistered(t *testing.T, name string, args ...string) error {
 	t.Helper()
 	for _, rc := range GetRegisteredConnectors() {

@@ -184,7 +184,7 @@ func TestWriteUpdatesRetriesEvenWhenNoStaleHolderIsLeft(t *testing.T) {
 	require.Equal(t, conflictRetried, commandNames(*commands))
 }
 
-var idRetried = []string{"update", "findAndModify", "update"}
+var idConflictSettings = ConnectorSettings{FullDocumentKey: true, ReplaceIDConflicts: true}
 
 func extendedKeyUpdate(t *testing.T, id string, partition int) *adiomv1.Update {
 	return &adiomv1.Update{
@@ -194,60 +194,174 @@ func extendedKeyUpdate(t *testing.T, id string, partition int) *adiomv1.Update {
 	}
 }
 
+func extendedKeyPartial(t *testing.T, id string, partition int, data bson.M) *adiomv1.Update {
+	return &adiomv1.Update{
+		Id:   []*adiomv1.BsonValue{bsonID(t, "_id", id), bsonID(t, "PartitionId", partition)},
+		Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE,
+		Data: mustMarshal(t, data),
+	}
+}
+
 func idConflict(index int, id string) bson.D {
 	return duplicateKey(index, "_id_", `{ _id: "`+id+`" }`, idIndexKey, bson.D{{Key: "_id", Value: id}})
 }
 
-func TestWriteUpdatesReplacesStaleShardKeyHolderWithoutTheFlag(t *testing.T) {
-	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
-		failedWriteReply(idConflict(0, "fresh")), staleHolderReply("fresh"), writeOKReply)
+func requireReplacesByIDAlone(t *testing.T, sent sentCommand, id string, partition int64) {
+	t.Helper()
+	require.Equal(t, "update", sent.name)
+	updates, err := sent.command.Lookup("updates").Array().Values()
+	require.NoError(t, err)
+	require.Len(t, updates, 1)
+	update := updates[0].Document()
+	require.Equal(t, bson.Raw(mustMarshal(t, bson.D{{Key: "_id", Value: id}})), update.Lookup("q").Document())
+	require.True(t, update.Lookup("upsert").Boolean())
+	require.Equal(t, partition, update.Lookup("u").Document().Lookup("PartitionId").AsInt64())
+}
+
+func TestWriteUpdatesReplacesIDConflictByIDAlone(t *testing.T) {
+	logs := captureLogs(t)
+	c, commands := recordingConn(t, idConflictSettings, failedWriteReply(idConflict(0, "fresh")), writeOKReply)
 
 	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11))
 
 	require.NoError(t, err)
-	require.Equal(t, idRetried, commandNames(*commands))
-	deletion := (*commands)[1]
-	require.Equal(t, "findAndModify", deletion.name)
-	require.True(t, deletion.command.Lookup("remove").Boolean())
-	want := mustMarshal(t, bson.D{{Key: "_id", Value: "fresh"}})
-	require.Equal(t, bson.Raw(want), deletion.command.Lookup("query").Document())
+	require.Equal(t, []string{"update", "update"}, commandNames(*commands))
+	requireReplacesByIDAlone(t, (*commands)[1], "fresh", 11)
+	require.Contains(t, logs.String(), "level=WARN")
+	require.Contains(t, logs.String(), conflictNamespace)
+	require.Contains(t, logs.String(), "fresh")
 }
 
-func TestWriteUpdatesKeepsIDConflictForPlainIDFilterWithFullKey(t *testing.T) {
-	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
-		failedWriteReply(idConflict(0, "fresh")))
+func TestWriteUpdatesKeepsIDConflictWithoutReplaceIDConflicts(t *testing.T) {
+	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true, DeleteUniqueConflicts: true}, failedWriteReply(idConflict(0, "fresh")))
 
-	_, err := writeUpdates(c, false, insertU(t, "fresh", bson.M{"_id": "fresh"}))
+	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11))
 
 	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
 	require.ErrorContains(t, err, "E11000")
 	require.Equal(t, []string{"update"}, commandNames(*commands))
 }
 
-func TestWriteUpdatesRetriesIDHolderWhenTheRetryRaces(t *testing.T) {
-	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
-		failedWriteReply(idConflict(0, "fresh")), staleHolderReply("fresh"),
-		failedWriteReply(idConflict(0, "fresh")), staleHolderReply("fresh"), writeOKReply)
+func TestWriteUpdatesLeavesOtherIDConflictsAlone(t *testing.T) {
+	collated := append(idConflict(0, "fresh"), bson.E{Key: "collation", Value: bson.D{{Key: "locale", Value: "en"}, {Key: "strength", Value: 2}}})
+	cosmosSink := idConflictSettings
+	cosmosSink.CosmosSink = true
+	for name, test := range map[string]struct {
+		settings ConnectorSettings
+		conflict bson.D
+		update   func(t *testing.T) *adiomv1.Update
+	}{
+		// An upsert by _id alone updates the holder, so its _id conflict is not a missed shard key.
+		"plain _id filter": {idConflictSettings, idConflict(0, "fresh"), func(t *testing.T) *adiomv1.Update {
+			return insertU(t, "fresh", bson.M{"_id": "fresh"})
+		}},
+		// After a replace by _id an upsert of $set alone would leave a fragment of the document.
+		"partial update": {idConflictSettings, idConflict(0, "fresh"), func(t *testing.T) *adiomv1.Update {
+			return extendedKeyPartial(t, "fresh", 11, bson.M{"Name": "new"})
+		}},
+		// Under a collation a filter by _id can match another _id that collates equal.
+		"collated _id index": {idConflictSettings, collated, func(t *testing.T) *adiomv1.Update {
+			return extendedKeyUpdate(t, "fresh", 11)
+		}},
+		// Cosmos DB keeps one _id under several shard key values, so a duplicate _id there is not this case.
+		"Cosmos DB sink": {cosmosSink, idConflict(0, "fresh"), func(t *testing.T) *adiomv1.Update {
+			return extendedKeyUpdate(t, "fresh", 11)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, commands := recordingConn(t, test.settings, failedWriteReply(test.conflict))
 
-	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11))
+			_, err := writeUpdates(c, false, test.update(t))
 
-	require.NoError(t, err)
-	require.Equal(t, []string{"update", "findAndModify", "update", "findAndModify", "update"}, commandNames(*commands))
+			require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+			require.ErrorContains(t, err, "E11000")
+			require.Equal(t, []string{"update"}, commandNames(*commands))
+		})
+	}
 }
 
-func TestWriteUpdatesGivesUpOnIDHolderAfterBoundedRetries(t *testing.T) {
-	c, commands := recordingConn(t, ConnectorSettings{FullDocumentKey: true},
-		failedWriteReply(idConflict(0, "fresh")),
-		staleHolderReply("fresh"), failedWriteReply(idConflict(0, "fresh")),
-		staleHolderReply("fresh"), failedWriteReply(idConflict(0, "fresh")),
-		staleHolderReply("fresh"), failedWriteReply(idConflict(0, "fresh")))
+func TestWriteUpdatesReplacesIDConflictOnlyOnce(t *testing.T) {
+	logs := captureLogs(t)
+	c, commands := recordingConn(t, idConflictSettings, failedWriteReply(idConflict(0, "fresh")), failedWriteReply(idConflict(0, "fresh")))
 
 	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11))
 
 	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
 	require.ErrorContains(t, err, "E11000")
-	want := []string{"update", "findAndModify", "update", "findAndModify", "update", "findAndModify", "update"}
-	require.Equal(t, want, commandNames(*commands))
+	require.Equal(t, []string{"update", "update"}, commandNames(*commands))
+	require.Contains(t, logs.String(), "Failed to replace")
+	require.NotContains(t, logs.String(), "persisted")
+}
+
+func TestWriteUpdatesReportsFailedIDReplaceAtTheOriginalInput(t *testing.T) {
+	c, commands := recordingConn(t, idConflictSettings, failedWriteReply(idConflict(2, "fresh")), failedWriteReply(idConflict(0, "fresh")))
+
+	// Unordered models are built from the last update backwards, so model 2 is the first input.
+	res, err := writeUpdates(c, true, extendedKeyUpdate(t, "fresh", 11), extendedKeyUpdate(t, "middle", 12), extendedKeyUpdate(t, "last", 13))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"update", "update"}, commandNames(*commands))
+	require.Len(t, res.Msg.GetFailures(), 1)
+	require.Equal(t, uint32(0), res.Msg.GetFailures()[0].GetIndex())
+}
+
+func TestWriteUpdatesResolvesIDAndUniqueConflictsInOneBatch(t *testing.T) {
+	settings := idConflictSettings
+	settings.DeleteUniqueConflicts = true
+	c, commands := recordingConn(t, settings,
+		failedWriteReply(clientIDConflict(0), idConflict(1, "fresh")), writeOKReply, plainClientIDIndexes(), staleHolderReply("stale"), writeOKReply)
+
+	// Unordered models are built from the last update backwards, so model 0 is "other" and model 1 is "fresh".
+	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11), insertU(t, "other", bson.M{"_id": "other", "ClientId": "c-1"}))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"update", "update", "listIndexes", "findAndModify", "update"}, commandNames(*commands))
+	requireReplacesByIDAlone(t, (*commands)[1], "fresh", 11)
+	requireDeletesOnlyOtherHolderOfClientID(t, (*commands)[3], "other")
+}
+
+func TestWriteUpdatesOrderedIDReplaceResumesAfterTheFailedWrite(t *testing.T) {
+	c, commands := recordingConn(t, idConflictSettings, failedWriteReply(idConflict(0, "fresh")), writeOKReply, writeOKReply)
+
+	// The trailing partial update makes the batch ordered: the server stopped at
+	// write 0, so write 1 was never attempted and has to run after the replace.
+	_, err := writeUpdates(c, false, extendedKeyUpdate(t, "fresh", 11), extendedKeyPartial(t, "fresh", 11, bson.M{"Name": "new"}))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"update", "update", "update"}, commandNames(*commands))
+	requireReplacesByIDAlone(t, (*commands)[1], "fresh", 11)
+	rest := (*commands)[2].command
+	require.True(t, rest.Lookup("ordered").Boolean())
+	remaining, err := rest.Lookup("updates").Array().Values()
+	require.NoError(t, err)
+	require.Len(t, remaining, 1)
+}
+
+func TestBuildBulkModelsKeepsTheNewestWriteOfAnID(t *testing.T) {
+	partitionOf := func(t *testing.T, model indexedWriteModel) int64 {
+		filter := model.model.(*mongo.ReplaceOneModel).Filter.(bson.D)
+		for _, e := range filter {
+			if e.Key == "PartitionId" {
+				return e.Value.(bson.RawValue).AsInt64()
+			}
+		}
+		t.Fatal("no PartitionId in the filter")
+		return 0
+	}
+	updates := []*adiomv1.Update{extendedKeyUpdate(t, "fresh", 11), extendedKeyUpdate(t, "fresh", 12)}
+
+	models, ordered, err := (&conn{settings: idConflictSettings}).buildIndexedBulkModels(conflictNamespace, updates)
+
+	require.NoError(t, err)
+	require.False(t, ordered)
+	require.Len(t, models, 1)
+	require.Equal(t, int64(12), partitionOf(t, models[0]))
+	require.ElementsMatch(t, []uint32{0, 1}, models[0].indices)
+
+	models, _, err = (&conn{settings: ConnectorSettings{FullDocumentKey: true}}).buildIndexedBulkModels(conflictNamespace, updates)
+
+	require.NoError(t, err)
+	require.Len(t, models, 2)
 }
 
 func TestWriteUpdatesDeletesNothingForOtherFailures(t *testing.T) {

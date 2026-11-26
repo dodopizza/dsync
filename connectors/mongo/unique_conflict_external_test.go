@@ -134,3 +134,112 @@ func TestMongoServerDeleteUniqueConflicts(t *testing.T) {
 		require.Equal(t, []string{"stale"}, ids(t, col))
 	})
 }
+
+// The mocked tests show the commands sent; only a real server shows what the
+// collection holds after a write that missed a document under another shard key value.
+func TestMongoServerReplaceIDConflicts(t *testing.T) {
+	uri := os.Getenv("MONGO_UNIQUE_CONFLICT_TEST_URI")
+	if uri == "" {
+		t.Skip("set MONGO_UNIQUE_CONFLICT_TEST_URI to run")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	client, err := mongo.Connect(options.Client().ApplyURI(uri).SetServerSelectionTimeout(10 * time.Second))
+	require.NoError(t, err)
+	defer client.Disconnect(context.Background())
+	db := client.Database(fmt.Sprintf("dsync_id_conflict_%d", time.Now().UnixNano()))
+	defer db.Drop(context.Background())
+
+	type stored struct {
+		ID          string `bson:"_id"`
+		PartitionId int    `bson:"PartitionId"`
+		V           string `bson:"V"`
+	}
+	sink := func(settings ConnectorSettings) *conn {
+		handler, err := NewConnWithClient(client, settings)
+		require.NoError(t, err)
+		return handler.(*conn)
+	}
+	seed := func(t *testing.T, index *mongo.IndexModel, documents ...any) *mongo.Collection {
+		col := db.Collection(fmt.Sprintf("c%d", time.Now().UnixNano()))
+		require.NoError(t, db.CreateCollection(ctx, col.Name()))
+		if index != nil {
+			_, err := col.Indexes().CreateOne(ctx, *index)
+			require.NoError(t, err)
+		}
+		if len(documents) > 0 {
+			_, err := col.InsertMany(ctx, documents)
+			require.NoError(t, err)
+		}
+		return col
+	}
+	contents := func(t *testing.T, col *mongo.Collection) []stored {
+		cursor, err := col.Find(ctx, bson.D{}, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
+		require.NoError(t, err)
+		var documents []stored
+		require.NoError(t, cursor.All(ctx, &documents))
+		return documents
+	}
+	write := func(c *conn, col *mongo.Collection, updates ...*adiomv1.Update) error {
+		_, err := c.WriteUpdates(ctx, connect.NewRequest(&adiomv1.WriteUpdatesRequest{Namespace: db.Name() + "." + col.Name(), Updates: updates}))
+		return err
+	}
+	full := func(id string, partition int, v string) *adiomv1.Update {
+		return &adiomv1.Update{
+			Id:   []*adiomv1.BsonValue{bsonID(t, "_id", id), bsonID(t, "PartitionId", partition)},
+			Type: adiomv1.UpdateType_UPDATE_TYPE_INSERT,
+			Data: mustMarshal(t, bson.M{"_id": id, "PartitionId": partition, "V": v}),
+		}
+	}
+	doc := func(id string, partition int, v string) bson.D {
+		return bson.D{{Key: "_id", Value: id}, {Key: "PartitionId", Value: partition}, {Key: "V", Value: v}}
+	}
+	on := ConnectorSettings{FullDocumentKey: true, ReplaceIDConflicts: true}
+
+	t.Run("a write under a new shard key value replaces the holder", func(t *testing.T) {
+		col := seed(t, nil, doc("a", 1, "old"), doc("b", 1, "bystander"))
+		require.NoError(t, write(sink(on), col, full("a", 2, "new")))
+		require.Equal(t, []stored{{"a", 2, "new"}, {"b", 1, "bystander"}}, contents(t, col))
+	})
+
+	t.Run("the newest write of an _id in a batch wins", func(t *testing.T) {
+		col := seed(t, nil)
+		require.NoError(t, write(sink(on), col, full("a", 1, "older"), full("a", 2, "newer")))
+		require.Equal(t, []stored{{"a", 2, "newer"}}, contents(t, col))
+	})
+
+	t.Run("the newest write wins over a third copy", func(t *testing.T) {
+		col := seed(t, nil, doc("a", 3, "third"))
+		require.NoError(t, write(sink(on), col, full("a", 1, "older"), full("a", 2, "newer")))
+		require.Equal(t, []stored{{"a", 2, "newer"}}, contents(t, col))
+	})
+
+	t.Run("a partial update leaves no fragment", func(t *testing.T) {
+		col := seed(t, nil, doc("a", 1, "old"))
+		partial := &adiomv1.Update{
+			Id:   []*adiomv1.BsonValue{bsonID(t, "_id", "a"), bsonID(t, "PartitionId", 2)},
+			Type: adiomv1.UpdateType_UPDATE_TYPE_PARTIAL_UPDATE,
+			Data: mustMarshal(t, bson.M{"V": "new"}),
+		}
+		require.ErrorContains(t, write(sink(on), col, partial), "E11000")
+		require.Equal(t, []stored{{"a", 1, "old"}}, contents(t, col))
+	})
+
+	t.Run("without the flag the conflict fails and nothing changes", func(t *testing.T) {
+		col := seed(t, nil, doc("a", 1, "old"))
+		require.ErrorContains(t, write(sink(ConnectorSettings{FullDocumentKey: true}), col, full("a", 2, "new")), "E11000")
+		require.Equal(t, []stored{{"a", 1, "old"}}, contents(t, col))
+	})
+
+	t.Run("an _id conflict and a unique key conflict in one batch", func(t *testing.T) {
+		index := mongo.IndexModel{Keys: bson.D{{Key: "ClientId", Value: 1}}, Options: options.Index().SetUnique(true)}
+		col := seed(t, &index, doc("a", 1, "old"), bson.D{{Key: "_id", Value: "stale"}, {Key: "ClientId", Value: "c-1"}})
+		settings := on
+		settings.DeleteUniqueConflicts = true
+		other := insertU(t, "other", bson.M{"_id": "other", "ClientId": "c-1"})
+		require.NoError(t, write(sink(settings), col, full("a", 2, "new"), other))
+		require.Equal(t, []stored{{"a", 2, "new"}, {ID: "other"}}, contents(t, col))
+	})
+}
