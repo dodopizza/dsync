@@ -144,6 +144,10 @@ func MongoFlagsCommandFlags() []cli.Flag {
 			Name:  "delete-unique-conflicts",
 			Usage: "when writing: on a duplicate key in a unique index other than _id, delete the document holding the key and retry once; requires the same unique index on the source",
 		},
+		&cli.BoolFlag{
+			Name:  "replace-id-conflicts",
+			Usage: "when writing with --full-document-key: keep one document per _id; the newest write of an _id in a batch wins, and a full-document write that fails on a duplicate _id is retried once as a replace by _id alone. For a source that may hold one _id under several shard key values",
+		},
 	}
 }
 
@@ -164,6 +168,7 @@ func ParseMongoFlags(c *cli.Context) (*MongoFlags, error) {
 	cfg.PerNamespaceStreams = c.Bool("per-namespace-streams")
 	cfg.DocumentdbSamplingFanout = int32(c.Int("documentdb-sampling-fanout"))
 	cfg.DeleteUniqueConflicts = c.Bool("delete-unique-conflicts")
+	cfg.ReplaceIdConflicts = c.Bool("replace-id-conflicts")
 	return cfg, nil
 }
 

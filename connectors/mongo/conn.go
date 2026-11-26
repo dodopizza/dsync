@@ -48,6 +48,7 @@ type ConnectorSettings struct {
 	PageBufferTTL              time.Duration
 	CosmosSink                 bool
 	DeleteUniqueConflicts      bool
+	ReplaceIDConflicts         bool
 
 	Query string // query filter, as a v2 Extended JSON string, e.g., '{\"x\":{\"$gt\":1}}'"
 }
@@ -1339,6 +1340,13 @@ func (c *conn) buildIndexedBulkModels(namespace string, updates []*adiomv1.Updat
 		if model == nil {
 			continue
 		}
+		// The destination keeps one document per _id: two writes of an _id under
+		// different shard key values must not both run in one unordered batch.
+		if c.replacesIDConflicts() {
+			if key := idOnlyKey(update); key != "" {
+				idKey = key
+			}
+		}
 		compiled = append(compiled, compiledUpdate{model: model, idKey: idKey, typ: update.GetType(), index: uint32(i)}) // #nosec G115 -- protobuf messages cannot contain more than uint32 items
 	}
 
@@ -1430,6 +1438,138 @@ func failuresFromBulkWrite(err error, models []indexedWriteModel, ordered bool) 
 		}
 	}
 	return failures, true
+}
+
+// replacesIDConflicts reports whether writes keep one document per _id. Only a
+// full document key can miss a document holding the _id, and a Cosmos DB sink
+// keeps one _id under several shard key values.
+func (c *conn) replacesIDConflicts() bool {
+	return c.settings.ReplaceIDConflicts && c.settings.FullDocumentKey && !c.settings.CosmosSink
+}
+
+func idOnlyKey(update *adiomv1.Update) string {
+	for _, part := range update.GetId() {
+		if part.GetName() == "_id" || part.GetName() == "" {
+			return util.BsonIdKey([]*adiomv1.BsonValue{{Name: "_id", Type: part.GetType(), Data: part.GetData()}})
+		}
+	}
+	return ""
+}
+
+// retryIDConflictsByID handles writes whose full-document-key filter matched
+// no document while a document under another shard key value holds their _id:
+// the upsert took the insert path and failed on _id_. Each one runs once more
+// as a replace by _id alone. Other write errors are returned along with any
+// failed replace, with indexes pointing into models.
+func retryIDConflictsByID(ctx context.Context, col *mongo.Collection, models []mongo.WriteModel, ordered bool, writeErr error) error {
+	bulkErr, ok := errors.AsType[mongo.BulkWriteException](writeErr)
+	if !ok || bulkErr.WriteConcernError != nil || len(bulkErr.WriteErrors) == 0 {
+		return writeErr
+	}
+	if ordered {
+		// An ordered batch stopped at its only failure, so the writes after it never ran.
+		we := bulkErr.WriteErrors[0]
+		replace, ok := idConflictReplace(we, models)
+		if !ok {
+			return writeErr
+		}
+		if failed, err := replaceByID(ctx, col, we.Index, replace); err != nil {
+			if failed == nil {
+				return err
+			}
+			bulkErr.WriteErrors = []mongo.BulkWriteError{*failed}
+			return bulkErr
+		}
+		next := we.Index + 1
+		if next == len(models) {
+			return nil
+		}
+		_, err := col.BulkWrite(ctx, models[next:], options.BulkWrite().SetOrdered(true))
+		restErr, ok := errors.AsType[mongo.BulkWriteException](err)
+		if !ok {
+			return err
+		}
+		for i := range restErr.WriteErrors {
+			restErr.WriteErrors[i].Index += next
+		}
+		return restErr
+	}
+	var rest []mongo.BulkWriteError
+	replaced := false
+	for _, we := range bulkErr.WriteErrors {
+		replace, ok := idConflictReplace(we, models)
+		if !ok {
+			rest = append(rest, we)
+			continue
+		}
+		replaced = true
+		if failed, err := replaceByID(ctx, col, we.Index, replace); err != nil {
+			if failed == nil {
+				return err
+			}
+			rest = append(rest, *failed)
+		}
+	}
+	if !replaced {
+		return writeErr
+	}
+	if len(rest) == 0 {
+		return nil
+	}
+	bulkErr.WriteErrors = rest
+	return bulkErr
+}
+
+// idConflictReplace matches a duplicate key on _id_ of a full-document replace
+// whose filter carries more than _id; with _id alone the upsert would have
+// matched the holder. A partial update is left out: an upsert of its fields
+// would leave a fragment. So is a collated _id index, under which a filter by
+// _id can match another _id.
+func idConflictReplace(we mongo.BulkWriteError, models []mongo.WriteModel) (*mongo.ReplaceOneModel, bool) {
+	if !mongo.IsDuplicateKeyError(we) || we.Index < 0 || we.Index >= len(models) {
+		return nil, false
+	}
+	if _, err := we.Raw.LookupErr("collation"); err == nil {
+		return nil, false
+	}
+	keyPattern, ok := we.Raw.Lookup("keyPattern").DocumentOK()
+	if !ok {
+		return nil, false
+	}
+	elements, err := keyPattern.Elements()
+	if err != nil || len(elements) != 1 || elements[0].Key() != "_id" {
+		return nil, false
+	}
+	model, ok := models[we.Index].(*mongo.ReplaceOneModel)
+	if !ok {
+		return nil, false
+	}
+	filter, _ := model.Filter.(bson.D)
+	idIndex := slices.IndexFunc(filter, func(e bson.E) bool { return e.Key == "_id" })
+	if idIndex < 0 || len(filter) < 2 {
+		return nil, false
+	}
+	return mongo.NewReplaceOneModel().SetFilter(bson.D{filter[idIndex]}).SetReplacement(model.Replacement).SetUpsert(true), true
+}
+
+// replaceByID sends the replace on its own: a write that changes a shard key
+// value must be a batch of one.
+func replaceByID(ctx context.Context, col *mongo.Collection, index int, replace *mongo.ReplaceOneModel) (*mongo.BulkWriteError, error) {
+	ns := col.Database().Name() + "." + col.Name()
+	id := replace.Filter.(bson.D)[0].Value
+	_, err := col.ReplaceOne(ctx, replace.Filter, replace.Replacement, options.Replace().SetUpsert(true))
+	if err == nil {
+		slog.Warn(fmt.Sprintf("Replaced the document holding _id %v in %v: the write's shard key value matched no document", id, ns))
+		return nil, nil
+	}
+	slog.Error(fmt.Sprintf("Failed to replace the document holding _id %v in %v by _id: %v", id, ns, err))
+	writeErr, ok := errors.AsType[mongo.WriteException](err)
+	if !ok || len(writeErr.WriteErrors) == 0 {
+		return nil, err
+	}
+	failed := mongo.BulkWriteError{WriteError: writeErr.WriteErrors[0], Request: replace}
+	failed.Index = index
+	return &failed, err
 }
 
 type uniqueConflict struct {
@@ -1606,6 +1746,9 @@ func (c *conn) WriteUpdates(ctx context.Context, r *connect.Request[adiomv1.Writ
 		models[i] = model.model
 	}
 	_, err = col.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(ordered))
+	if err != nil && c.replacesIDConflicts() {
+		err = retryIDConflictsByID(ctx, col, models, ordered, err)
+	}
 	if err != nil && c.settings.DeleteUniqueConflicts {
 		err = retryAfterDeletingStaleUniqueHolders(ctx, col, models, ordered, err)
 	}

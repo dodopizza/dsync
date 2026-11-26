@@ -148,6 +148,7 @@ type MongoFlags struct {
 	PerNamespaceStreams      bool                   `protobuf:"varint,3,opt,name=per_namespace_streams,json=perNamespaceStreams,proto3" json:"per_namespace_streams,omitempty"`
 	DocumentdbSamplingFanout int32                  `protobuf:"varint,4,opt,name=documentdb_sampling_fanout,json=documentdbSamplingFanout,proto3" json:"documentdb_sampling_fanout,omitempty"`
 	DeleteUniqueConflicts    bool                   `protobuf:"varint,5,opt,name=delete_unique_conflicts,json=deleteUniqueConflicts,proto3" json:"delete_unique_conflicts,omitempty"`
+	ReplaceIdConflicts       bool                   `protobuf:"varint,6,opt,name=replace_id_conflicts,json=replaceIdConflicts,proto3" json:"replace_id_conflicts,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -217,6 +218,13 @@ func (x *MongoFlags) GetDeleteUniqueConflicts() bool {
 	return false
 }
 
+func (x *MongoFlags) GetReplaceIdConflicts() bool {
+	if x != nil {
+		return x.ReplaceIdConflicts
+	}
+	return false
+}
+
 var File_adiom_commands_connectors_v1_mongo_proto protoreflect.FileDescriptor
 
 const file_adiom_commands_connectors_v1_mongo_proto_rawDesc = "" +
@@ -242,7 +250,7 @@ const file_adiom_commands_connectors_v1_mongo_proto_rawDesc = "" +
 	"\x0fpage_buffer_ttl\x18\n" +
 	" \x01(\v2\x19.google.protobuf.DurationBm\x82\xb5\x18i\n" +
 	"\x0fpage-buffer-ttl\x12Rhow long an initial sync read buffer waits for the writer to request its next page\x1a\x021hR\rpageBufferTtl:\x0f\x82\xb5\x18\v\n" +
-	"\tMongoBase\"\x85\x06\n" +
+	"\tMongoBase\"\xeb\b\n" +
 	"\n" +
 	"MongoFlags\x12@\n" +
 	"\x04base\x18\x01 \x01(\v2,.adiom.commands.connectors.v1.MongoBaseFlagsR\x04base\x12c\n" +
@@ -253,7 +261,9 @@ const file_adiom_commands_connectors_v1_mongo_proto_rawDesc = "" +
 	"\x1adocumentdb_sampling_fanout\x18\x04 \x01(\x05Bd\x82\xb5\x18`\n" +
 	"\x1adocumentdb-sampling-fanout\x12;maximum number of concurrent sample requests for DocumentDB\x1a\x03100(\x01R\x18documentdbSamplingFanout\x12\xfd\x01\n" +
 	"\x17delete_unique_conflicts\x18\x05 \x01(\bB\xc4\x01\x82\xb5\x18\xbf\x01\n" +
-	"\x17delete-unique-conflicts\x12\xa3\x01when writing: on a duplicate key in a unique index other than _id, delete the document holding the key and retry once; requires the same unique index on the sourceR\x15deleteUniqueConflicts:4\x82\xb5\x180\n" +
+	"\x17delete-unique-conflicts\x12\xa3\x01when writing: on a duplicate key in a unique index other than _id, delete the document holding the key and retry once; requires the same unique index on the sourceR\x15deleteUniqueConflicts\x12\xe3\x02\n" +
+	"\x14replace_id_conflicts\x18\x06 \x01(\bB\xb0\x02\x82\xb5\x18\xab\x02\n" +
+	"\x14replace-id-conflicts\x12\x92\x02when writing with --full-document-key: keep one document per _id; the newest write of an _id in a batch wins, and a full-document write that fails on a duplicate _id is retried once as a replace by _id alone. For a source that may hold one _id under several shard key valuesR\x12replaceIdConflicts:4\x82\xb5\x180\n" +
 	"\aMongoDB\"%mongodb://connection-string [options]BKZIgithub.com/adiom-data/dsync/gen/adiom/commands/connectors/v1;connectorsv1b\x06proto3"
 
 var (

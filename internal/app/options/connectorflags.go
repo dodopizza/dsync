@@ -828,6 +828,7 @@ func mongoSettingsFromFlags(f *connectorsv1.MongoFlags, connString string) mongo
 	s.PerNamespaceStreams = f.PerNamespaceStreams
 	s.DocumentDBSamplingFanout = int(f.DocumentdbSamplingFanout)
 	s.DeleteUniqueConflicts = f.DeleteUniqueConflicts
+	s.ReplaceIDConflicts = f.ReplaceIdConflicts
 	return s
 }
 
